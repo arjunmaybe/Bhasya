@@ -31,6 +31,23 @@ export class DevGroundedAdapter implements ProviderAdapter {
     const sel = input.selection.trim();
     const ctx = input.nearbyContext.filter(Boolean).slice(0, 2);
     const preview = sel.length > 600 ? sel.slice(0, 600) + '…' : sel;
+    const req = input.userRequest.trim();
+    // Follow-up questions reuse the same thread/passage context but must get
+    // a new answer conditioned on the NEW question — never a repeat of the
+    // initial explanation. The default Explain request keeps its exact
+    // existing template; any other non-empty request gets a deterministic
+    // follow-up template grounded in the same selection.
+    if (req.length > 0 && req !== 'Explain this passage.') {
+      const q = req.length > 300 ? req.slice(0, 300) + '…' : req;
+      const lines = [
+        `You asked: “${q}”`,
+        '',
+        `Grounded in this passage: “${preview}”`,
+        '',
+        `Answering that from the passage: considering “${q}”, the relevant point is ${keyIdea(sel)} — apply that to the quoted wording above rather than going beyond the text.`,
+      ];
+      return { text: lines.join('\n'), modelId: this.id };
+    }
     const lines = [
       `This passage says: “${preview}”`,
       '',

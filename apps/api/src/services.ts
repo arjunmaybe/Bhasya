@@ -389,9 +389,16 @@ export async function explainSelection(
   // Phase 2 validation: time the AI call so latency is measurable from the
   // existing thread events (metadata only — never prompts/responses/content).
   const explainStartedAt = Date.now();
+  // The explanation is about the user's exact persisted selection. The full
+  // passage text stays available as grounding context (first L1 entry) so the
+  // explanation remains grounded in its passage when the selection is a slice
+  // of that passage. Fallback to the passage text only when selected_text is
+  // unexpectedly empty (resolveAnchor normally rejects empty selections).
+  const exactSelection = String(arow.selected_text ?? '').trim();
+  const selection = exactSelection.length > 0 ? exactSelection : ctx.l0.text;
   const out = await svc.router.explain({
-    selection: ctx.l0.text,
-    nearbyContext: ctx.l1.map((p) => p.text),
+    selection,
+    nearbyContext: [ctx.l0.text, ...ctx.l1.map((p) => p.text)],
     userRequest: question,
     title: String(titleRow?.title ?? ''),
   });
