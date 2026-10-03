@@ -118,6 +118,7 @@ function ExplainPopover({
       onMouseDown={(e) => e.preventDefault()}
       onClick={onPick}
       disabled={busy}
+      aria-label={busy ? 'Explaining selected passage' : 'Explain selected passage'}
     >
       {busy ? 'Explaining…' : 'Explain'}
     </button>
@@ -129,6 +130,11 @@ function ExplainPopover({
  * - text selection → passage identification → Explain popover
  * - anchor/highlight persistence, passage thread panel, citation navigation
  * - reopen: highlights + threads reload from the Hono API
+ *
+ * Active context is explicit and keyed by thread:
+ * openThreadId + activeAnchorId + activePassageId always move together so
+ * passage A and passage B never share a panel, even when the provider
+ * returns identical explanation text for both.
  */
 export function ReaderClient(props: {
   versionId: string;
@@ -146,6 +152,8 @@ export function ReaderClient(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
+  const [activeAnchorId, setActiveAnchorId] = useState<string | null>(null);
+  const [activePassageId, setActivePassageId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [cites, setCites] = useState<Cite[]>([]);
   const [evidence, setEvidence] = useState<EvidenceDto[]>([]);
@@ -258,8 +266,37 @@ export function ReaderClient(props: {
     };
   }, []);
 
+  function clearThreadState() {
+    setOpenThreadId(null);
+    setActiveAnchorId(null);
+    setActivePassageId(null);
+    setMessages([]);
+    setCites([]);
+    setEvidence([]);
+    setThreadSel('');
+    setFollowup('');
+  }
+
+  function closeThread(returnToReading: boolean) {
+    const passageId = activePassageId;
+    clearThreadState();
+    if (returnToReading && passageId) {
+      // Closing returns naturally to reading: bring the passage back into view.
+      setTimeout(() => scrollToPassage(passageId), 30);
+    }
+  }
+
   async function openThread(threadId: string, anchorSelectedText?: string) {
     setError('');
+    // Resolve passage context from the persisted highlight before fetching so
+    // the panel is keyed correctly even before messages arrive.
+    const hl = highlights.find((h) => h.thread_id === threadId) ?? null;
+    const contextPassageId = hl?.passage_id ?? activePassageId;
+    const contextAnchorId = hl?.anchor_id ?? null;
+    const contextText = anchorSelectedText ?? hl?.selected_text ?? '';
+    if (contextPassageId) setActivePassageId(contextPassageId);
+    if (contextAnchorId) setActiveAnchorId(contextAnchorId);
+    if (contextText) setThreadSel(contextText);
     try {
       const r = (await browserReq(`/api/threads/${threadId}`)) as {
         thread: { id: string }; messages: Msg[]; citations: Cite[]; evidence: EvidenceDto[];
@@ -269,6 +306,9 @@ export function ReaderClient(props: {
       setCites(r.citations ?? []);
       setEvidence(r.evidence ?? []);
       if (anchorSelectedText) setThreadSel(anchorSelectedText);
+      else if (hl?.selected_text) setThreadSel(hl.selected_text);
+      // Reopening returns to its passage context.
+      if (contextPassageId) scrollToPassage(contextPassageId);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'could not reopen thread');
     }
@@ -276,6 +316,8 @@ export function ReaderClient(props: {
 
   async function explain() {
     if (!pending || busy) return;
+    const selectedText = pending.text;
+    const selectedPassageId = pending.passageId;
     setBusy(true);
     setError('');
     try {
@@ -299,17 +341,22 @@ export function ReaderClient(props: {
           ? prev
           : [...prev, {
             highlight_id: `local-${anchor.anchorId}`, anchor_id: anchor.anchorId,
-            selected_text: pending.text, structural_path: '', passage_id: anchor.passageId,
+            selected_text: selectedText, structural_path: '', passage_id: anchor.passageId,
             thread_id: result.threadId,
           }],
       );
       setPending(null);
       window.getSelection()?.removeAllRanges();
+      // Key the panel to this exact anchor/passage/thread triple. The passage
+      // excerpt is shown verbatim so two passages stay distinct contexts even
+      // when the provider returns identical explanation text.
       setOpenThreadId(result.threadId);
+      setActiveAnchorId(anchor.anchorId);
+      setActivePassageId(anchor.passageId ?? selectedPassageId);
       setMessages(detail.messages);
       setCites(detail.citations ?? []);
       setEvidence(detail.evidence ?? []);
-      setThreadSel(pending.text);
+      setThreadSel(selectedText);
       // Refresh authoritative highlight list (survives reload).
       browserReq(`/api/documents/${versionId}/highlights`)
         .then((r: any) => setHighlights(r.highlights))
@@ -380,6 +427,27 @@ export function ReaderClient(props: {
     }
   }
 
+  function handlePassageClick(passageId: string) {
+    return (e: React.MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      const mark = target?.closest?.('mark.hl') as HTMLElement | null;
+      if (!mark) return;
+      const slice = mark.textContent ?? '';
+      const candidates = hlByPassage.get(passageId) ?? [];
+      const match =
+        candidates.find((h) => h.selected_text === slice) ??
+        candidates.find((h) => h.selected_text && slice.includes(h.selected_text.slice(0, 24))) ??
+        candidates.find((h) => h.thread_id) ??
+        null;
+      if (match?.thread_id) {
+        e.preventDefault();
+        void openThread(match.thread_id, match.selected_text);
+      } else if (match && match.passage_id) {
+        scrollToPassage(match.passage_id);
+      }
+    };
+  }
+
   // Citations grouped by assistant message via Evidence:
   // Thread Message → Evidence → Passage → Document Version.
   const citesByMessage = useMemo(() => {
@@ -444,53 +512,108 @@ export function ReaderClient(props: {
     }));
   }, [nodes, props.headingBySection]);
 
+  const activePassage = activePassageId ? passageMap.get(activePassageId) ?? null : null;
+
   return (
     <div className="reader">
-      <article className="doc" ref={docRef}>
-        <h1>{title}</h1>
-        {sourceUrl ? <p className="meta">{sourceUrl}</p> : null}
-        {sections.map(({ section, heading, children }) => (
-          <section key={section.id}>
-            {heading ? <h2>{heading}</h2> : null}
-            {children.map((n) => {
-              const p = props.passageByNodeId[n.id] ? passageMap.get(props.passageByNodeId[n.id]) : undefined;
-              if (n.node_type === 'heading') return null;
-              const text = p?.text ?? n.text;
-              if (!text) return null;
-              const hls = p ? (hlByPassage.get(p.id) ?? []) : [];
-              const flash = p && citeFlash && citeFlash.passageId === p.id
-                ? { start: citeFlash.start, end: citeFlash.end }
-                : null;
-              return (
-                <p key={n.id} className="passage" data-passage-id={p?.id} data-node-path={n.structural_path}>
-                  <MarkedPassageText
-                    text={text}
-                    selections={hls.map((h) => h.selected_text)}
-                    flash={flash}
-                  />
-                </p>
-              );
-            })}
-          </section>
-        ))}
-        {pending ? (
-          <ExplainPopover
-            anchorX={pending.anchorX}
-            anchorY={pending.anchorY}
-            busy={busy}
-            onPick={explain}
-          />
-        ) : null}
+      <article className="doc" ref={docRef} aria-label="Document reading view">
+        <div className="doc-inner">
+          <header className="doc-header">
+            <h1>{title}</h1>
+            {sourceUrl ? <p className="meta doc-source">{sourceUrl}</p> : null}
+          </header>
+          {sections.map(({ section, heading, children }) => (
+            <section key={section.id} aria-label={heading || 'Document section'}>
+              {heading ? <h2>{heading}</h2> : null}
+              {children.map((n) => {
+                const p = props.passageByNodeId[n.id] ? passageMap.get(props.passageByNodeId[n.id]) : undefined;
+                if (n.node_type === 'heading') return null;
+                const text = p?.text ?? n.text;
+                if (!text) return null;
+                const hls = p ? (hlByPassage.get(p.id) ?? []) : [];
+                const flash = p && citeFlash && citeFlash.passageId === p.id
+                  ? { start: citeFlash.start, end: citeFlash.end }
+                  : null;
+                const isActive = p ? p.id === activePassageId : false;
+                const threadCount = hls.filter((h) => h.thread_id).length;
+                return (
+                  <div key={n.id} className="passage-wrap">
+                    <p
+                      className={isActive ? 'passage active' : 'passage'}
+                      data-passage-id={p?.id}
+                      data-active={isActive ? 'true' : 'false'}
+                      data-node-path={n.structural_path}
+                      aria-current={isActive ? 'true' : undefined}
+                      onClick={p ? handlePassageClick(p.id) : undefined}
+                    >
+                      <MarkedPassageText
+                        text={text}
+                        selections={hls.map((h) => h.selected_text)}
+                        flash={flash}
+                      />
+                    </p>
+                    {p && threadCount > 0 ? (
+                      <div className="passage-threads" data-testid="passage-threads" data-passage-id={p.id}>
+                        <span className="passage-threads-label">
+                          {threadCount === 1 ? '1 thread in this passage' : `${threadCount} threads in this passage`}
+                        </span>
+                        {hls.filter((h) => h.thread_id).slice(0, 2).map((h) => (
+                          <button
+                            key={h.highlight_id}
+                            type="button"
+                            className="passage-thread-link"
+                            data-testid="passage-thread-link"
+                            data-thread-id={h.thread_id}
+                            data-anchor-id={h.anchor_id}
+                            onClick={() => openThread(h.thread_id as string, h.selected_text)}
+                            aria-label={`Open thread for passage excerpt ${(h.selected_text ?? '').slice(0, 60)}`}
+                          >
+                            Open thread
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </section>
+          ))}
+          {pending ? (
+            <ExplainPopover
+              anchorX={pending.anchorX}
+              anchorY={pending.anchorY}
+              busy={busy}
+              onPick={explain}
+            />
+          ) : null}
+        </div>
       </article>
 
-      <aside className="side">
-        {error ? <p className="error">{error}</p> : null}
+      <aside className="side" aria-label="Passage threads and highlights">
+        {error ? <p className="error" role="alert">{error}</p> : null}
 
         {openThreadId ? (
-          <div className="thread-card">
+          <div
+            className="thread-card"
+            key={openThreadId}
+            data-thread-id={openThreadId}
+            data-passage-id={activePassageId ?? ''}
+            data-anchor-id={activeAnchorId ?? ''}
+          >
             <div className="thread-head">
               <div className="meta">Passage thread</div>
               {threadSel ? <div className="sel">“{threadSel.slice(0, 280)}”</div> : null}
+              <div className="thread-context">
+                <button
+                  type="button"
+                  className="btn-ghost thread-context-btn"
+                  data-testid="view-passage-btn"
+                  onClick={() => { if (activePassageId) scrollToPassage(activePassageId); }}
+                  disabled={!activePassageId}
+                >
+                  View passage in document
+                </button>
+              </div>
             </div>
             <div
               className="thread-scroll"
@@ -514,6 +637,13 @@ export function ReaderClient(props: {
                 </div>
               ))}
               {ungroupedCites.length > 0 ? renderCitations(ungroupedCites) : null}
+              {busy ? (
+                <div className="thread-loading" data-testid="thread-loading" aria-live="polite">
+                  <div className="skeleton skeleton-line" />
+                  <div className="skeleton skeleton-line short" />
+                  <div className="skeleton skeleton-line" />
+                </div>
+              ) : null}
             </div>
             <div className="thread-foot">
               <form className="followup" onSubmit={sendFollowup}>
@@ -522,36 +652,67 @@ export function ReaderClient(props: {
                   onChange={(e) => setFollowup(e.target.value)}
                   placeholder="Ask a follow-up…"
                   aria-label="Follow-up question"
+                  disabled={busy}
                 />
-                <button className="btn-ghost" disabled={busy} type="submit">Send</button>
+                <button className="btn-ghost" disabled={busy || !followup.trim()} type="submit">Send</button>
               </form>
-              <button className="btn-ghost" onClick={() => { setOpenThreadId(null); setMessages([]); setCites([]); setEvidence([]); }} type="button">
-                Close thread
-              </button>
+              <div className="thread-actions">
+                <button className="btn-ghost" onClick={() => closeThread(true)} type="button">
+                  Close and return to reading
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : busy ? (
+          <div className="thread-card" data-testid="thread-loading-card" aria-live="polite">
+            <div className="thread-head">
+              <div className="meta">Preparing explanation</div>
+              {pending ? <div className="sel">“{pending.text.slice(0, 280)}”</div> : null}
+            </div>
+            <div className="thread-loading" data-testid="thread-loading">
+              <div className="skeleton skeleton-line" />
+              <div className="skeleton skeleton-line short" />
+              <div className="skeleton skeleton-line" />
+              <div className="skeleton skeleton-line short" />
             </div>
           </div>
         ) : (
           <div className="thread-card">
             <div className="meta">No thread open</div>
-            <p style={{ fontSize: 14 }}>Select any sentence in the document — <b>Explain</b> appears immediately. The explanation stays attached to that exact passage.</p>
+            <p style={{ fontSize: 14 }}>Select any sentence in the document — <b>Explain</b> appears near your selection. The explanation stays attached to that exact passage.</p>
+            {activePassage && threadSel ? (
+              <div className="thread-context">
+                <div className="sel">“{threadSel.slice(0, 280)}”</div>
+              </div>
+            ) : null}
           </div>
         )}
 
-        <div className="hl-list">
+        <div className="hl-list" aria-label="Highlights and threads">
           <b>Highlights ({highlights.length})</b>
           {highlights.length === 0 ? <p className="meta">None yet.</p> : null}
-          {highlights.map((h) => (
-            <button
-              key={h.highlight_id}
-              onClick={() => {
-                if (h.thread_id) openThread(h.thread_id, h.selected_text);
-                else if (h.passage_id) scrollToPassage(h.passage_id);
-              }}
-              title="Reopen thread"
-            >
-              “{(h.selected_text ?? '').slice(0, 90)}”
-            </button>
-          ))}
+          {highlights.map((h) => {
+            const isActiveThread = h.thread_id != null && h.thread_id === openThreadId;
+            return (
+              <button
+                key={h.highlight_id}
+                data-testid="highlight-link"
+                data-thread-id={h.thread_id ?? ''}
+                data-passage-id={h.passage_id}
+                data-anchor-id={h.anchor_id}
+                data-active={isActiveThread ? 'true' : 'false'}
+                className={isActiveThread ? 'hl-item active' : 'hl-item'}
+                onClick={() => {
+                  if (h.thread_id) openThread(h.thread_id, h.selected_text);
+                  else if (h.passage_id) scrollToPassage(h.passage_id);
+                }}
+                title={h.thread_id ? 'Reopen thread' : 'View passage'}
+                aria-current={isActiveThread ? 'true' : undefined}
+              >
+                “{(h.selected_text ?? '').slice(0, 90)}”
+              </button>
+            );
+          })}
         </div>
       </aside>
     </div>
