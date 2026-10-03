@@ -161,7 +161,18 @@ export function ReaderClient(props: {
   const [followup, setFollowup] = useState('');
   const [citeFlash, setCiteFlash] = useState<{ passageId: string; start: number; end: number } | null>(null);
   const docRef = useRef<HTMLDivElement>(null);
+  // Dedicated ref to the thread conversation scroll container. Follow-up
+  // anchoring scrolls THIS element only, never the whole page.
   const threadScrollRef = useRef<HTMLDivElement>(null);
+  const followupInputRef = useRef<HTMLInputElement>(null);
+  // True while the conversation view sits near the bottom. Updated from the
+  // container's own scroll events so manual reading of older messages is
+  // never yanked away by unrelated renders.
+  const stickToBottomRef = useRef(true);
+  // Set on submit; consumed by the anchoring effect so the just-asked
+  // question/response becomes visible even if the user had scrolled up.
+  const justSubmittedRef = useRef(false);
+  const focusAfterSendRef = useRef(false);
   const citeFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => () => {
@@ -207,13 +218,35 @@ export function ReaderClient(props: {
     }
   }, [clearFlash]);
 
-  // Keep the latest thread message reachable in long threads.
-  useEffect(() => {
+  // Conversation anchoring: scroll the conversation container itself to the
+  // newest content only when the user just submitted a follow-up, or when
+  // the view was already near the bottom. Manual reading of older messages
+  // is left alone. State-driven via messages/cites/openThreadId/busy, no
+  // arbitrary timeouts, and never scrolls the page to the passage here.
+  const handleThreadScroll = useCallback(() => {
     const el = threadScrollRef.current;
-    if (el && openThreadId && messages.length > 0) {
-      el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distance < 96;
+  }, []);
+
+  useLayoutEffect(() => {
+    const el = threadScrollRef.current;
+    if (!el || !openThreadId || messages.length === 0) return;
+    const shouldStick = justSubmittedRef.current || stickToBottomRef.current;
+    if (!shouldStick) return;
+    justSubmittedRef.current = false;
+    el.scrollTop = el.scrollHeight;
+  }, [messages, cites, openThreadId, busy]);
+
+  // Return keyboard focus to the composer after a follow-up round-trips,
+  // once the input is enabled again. State-driven, no timeouts.
+  useEffect(() => {
+    if (!busy && focusAfterSendRef.current) {
+      focusAfterSendRef.current = false;
+      followupInputRef.current?.focus();
     }
-  }, [messages, cites, openThreadId]);
+  }, [busy]);
 
   // Selection → passage identification → Explain popover appears immediately.
   // Stores viewport client coords only; the canonical anchor stays
@@ -406,6 +439,11 @@ export function ReaderClient(props: {
   async function sendFollowup(e: React.FormEvent) {
     e.preventDefault();
     if (!openThreadId || !followup.trim() || busy) return;
+    // Anchor the conversation to this new interaction: the anchoring effect
+    // consumes this flag when the fresh messages land.
+    justSubmittedRef.current = true;
+    stickToBottomRef.current = true;
+    focusAfterSendRef.current = true;
     setBusy(true);
     setError('');
     try {
@@ -421,6 +459,8 @@ export function ReaderClient(props: {
       setEvidence(detail.evidence ?? []);
       setFollowup('');
     } catch (e2) {
+      justSubmittedRef.current = false;
+      focusAfterSendRef.current = false;
       setError(e2 instanceof Error ? e2.message : 'message failed');
     } finally {
       setBusy(false);
@@ -447,6 +487,15 @@ export function ReaderClient(props: {
       }
     };
   }
+
+  // Index of the newest user question, so it stays easy to spot with a
+  // restrained marker. Derived from state, no extra network or DOM reads.
+  const lastUserIdx = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]?.role === 'user') return i;
+    }
+    return -1;
+  }, [messages]);
 
   // Citations grouped by assistant message via Evidence:
   // Thread Message → Evidence → Passage → Document Version.
@@ -622,11 +671,15 @@ export function ReaderClient(props: {
               role="log"
               aria-label="Passage thread messages"
               data-testid="thread-scroll"
+              onScroll={handleThreadScroll}
             >
-              {messages.map((m) => (
+              {messages.map((m, idx) => (
                 <div key={m.id}>
                   {m.role === 'user' ? (
-                    <div className="msg-user">{m.content}</div>
+                    <div
+                      className={idx === lastUserIdx ? 'msg-user msg-user-latest' : 'msg-user'}
+                      data-latest={idx === lastUserIdx ? 'true' : undefined}
+                    >{m.content}</div>
                   ) : (
                     <>
                       <div className="msg-ai">{m.content}</div>
@@ -648,6 +701,7 @@ export function ReaderClient(props: {
             <div className="thread-foot">
               <form className="followup" onSubmit={sendFollowup}>
                 <input
+                  ref={followupInputRef}
                   value={followup}
                   onChange={(e) => setFollowup(e.target.value)}
                   placeholder="Ask a follow-up…"
