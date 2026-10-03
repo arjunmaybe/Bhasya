@@ -1,0 +1,21 @@
+node_modules/
+apps/web/.next/
+apps/web/out/
+.bhasya-pglite/
+.bhasya-objects/
+*.tsbuildinfo
+dist/
+target/
+.env
+.env.local
+.dev.vars
+.wrangler/
+
+# Local runtime/debug artifacts
+*.log
+.bhasya-test-cookies.txt
+diag-*.mjs
+diag-*.txt
+flow-*-tmp.mjs
+staging-*-tmp.mjs
+tail-*.txt

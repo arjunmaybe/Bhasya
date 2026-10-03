@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "preserve",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@bhasya/core": ["packages/core/src/index.ts"],
+      "@bhasya/db": ["packages/db/src/index.ts"],
+      "@bhasya/ai": ["packages/ai/src/index.ts"],
+      "@/*": ["apps/web/*"]
+    }
+  },
+  "include": ["apps/*/src/**/*", "apps/*/app/**/*", "packages/*/src/**/*", "db/**/*.ts", "authorization/**/*.ts", "tests/**/*", "scripts/**/*"],
+  "exclude": ["node_modules", "**/node_modules", "apps/web/.next", "core-rs"]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "apps-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/dev.ts",
+    "build": "tsc --noEmit -p tsconfig.json",
+    "start": "node --import tsx src/dev.ts"
+  },
+  "dependencies": {
+    "@bhasya/ai": "*",
+    "@bhasya/core": "*",
+    "@bhasya/db": "*",
+    "@hono/node-server": "^1.13.7",
+    "hono": "^4.6.12",
+    "zod": "^3.23.8"
+  }
+}

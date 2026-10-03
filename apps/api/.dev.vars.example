@@ -1,0 +1,14 @@
+# Local `wrangler dev` vars. Copy to .dev.vars (gitignored, never commit).
+# Production uses `wrangler secret put` / dashboard secrets instead.
+#
+# BHASYA_USE_AUTH=1
+# BETTER_AUTH_SECRET=<32+ char secret for local smoke only>
+# BETTER_AUTH_URL=http://127.0.0.1:9587
+# BHASYA_MODEL_API_KEY=
+# BHASYA_MODEL_ID=dev-grounded-1
+# BHASYA_MODEL_ENDPOINT=https://api.openai.com/v1/chat/completions
+# DATABASE_URL=postgres://bhasya:bhasya@127.0.0.1:5432/bhasya
+# $0 staging storage (Supabase Storage ONLY, no R2 billing; same StoragePort):
+# SUPABASE_URL=https://<ref>.supabase.co
+# SUPABASE_SERVICE_KEY=<service_role key: server-side only, never commit>
+# SUPABASE_STORAGE_BUCKET=bhasya-artifacts

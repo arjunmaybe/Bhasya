@@ -1,0 +1,12 @@
+[package]
+name = "bhasya-core"
+version = "0.1.0"
+edition = "2021"
+description = "Bhasya shared canonical contracts (hashing, anchoring) — mirrors packages/core"
+
+[lib]
+name = "bhasya_core"
+path = "src/lib.rs"
+
+[dependencies]
+sha2 = "0.10"
