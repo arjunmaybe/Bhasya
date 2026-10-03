@@ -366,6 +366,18 @@ export async function explainSelection(
     const existing = (await svc.db.query(`SELECT id FROM threads WHERE anchor_id = $1 AND scope_type = 'passage' LIMIT 1`, [args.anchorId])).rows[0] as any;
     if (existing) threadId = String(existing.id);
   }
+  // Thread identity (pre-insert): an explicit threadId must belong to this
+  // anchor. Without this, anchor A's passage could be answered into thread B
+  // — cross-thread contamination. Checked before any insert so a mismatch
+  // leaves no stray user message behind.
+  if (threadId) {
+    const owner = (await svc.db.query(
+      `SELECT anchor_id FROM threads WHERE id = $1`, [threadId],
+    )).rows[0] as any;
+    if (!owner || String(owner.anchor_id) !== args.anchorId) {
+      throw new Error('thread anchor mismatch');
+    }
+  }
   const created = await withTransaction(svc.db, async (tx) => {
     let tid = threadId;
     let isNew = false;
@@ -385,6 +397,18 @@ export async function explainSelection(
     return { threadId: tid as string, userMessageId: String(urow.id), isNew };
   });
 
+  // Prior conversation in this thread only (oldest first, excluding the
+  // just-persisted current user message). Empty for the initial explanation.
+  // Scoped by thread_id so sibling threads never leak into each other.
+  const histRows = (await svc.db.query(
+    `SELECT role, content FROM thread_messages WHERE thread_id = $1 AND id <> $2 ORDER BY created_at ASC LIMIT 50`,
+    [created.threadId, created.userMessageId],
+  )).rows as any[];
+  const history = histRows
+    .filter((r) => r.role === 'user' || r.role === 'assistant')
+    .map((r) => ({ role: r.role as 'user' | 'assistant', content: String(r.content ?? '') }))
+    .filter((t) => t.content.trim().length > 0);
+
   // ── MODEL WORK OUTSIDE ANY TRANSACTION ──
   // Phase 2 validation: time the AI call so latency is measurable from the
   // existing thread events (metadata only — never prompts/responses/content).
@@ -401,6 +425,7 @@ export async function explainSelection(
     nearbyContext: [ctx.l0.text, ...ctx.l1.map((p) => p.text)],
     userRequest: question,
     title: String(titleRow?.title ?? ''),
+    history,
   });
   const explainDurationMs = Date.now() - explainStartedAt;
 

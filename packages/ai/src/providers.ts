@@ -1,9 +1,21 @@
 /** Provider-adapter boundary (frozen). UI/API never call providers directly. */
+export interface ChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface ExplainInput {
   selection: string;
   nearbyContext: string[];
   userRequest: string;
   title: string;
+  /**
+   * Prior turns in this thread (oldest first, excluding the current request).
+   * Empty for the initial explanation. Real providers need this so follow-ups
+   * resolve against the conversation; the dev adapter accepts it for contract
+   * parity but ignores it for text (deterministic output only).
+   */
+  history?: ChatTurn[];
 }
 
 export interface ExplainOutput {
@@ -28,6 +40,10 @@ const SYSTEM_RULE =
 export class DevGroundedAdapter implements ProviderAdapter {
   readonly id = 'dev-grounded-1';
   async explain(input: ExplainInput): Promise<ExplainOutput> {
+    // history is accepted for contract parity (tests spy on input) but
+    // intentionally NOT used for text: this adapter is deterministic and must
+    // not pretend to perform arbitrary semantic reasoning over conversation.
+    // Real conversation handling lives in HttpProviderAdapter.
     const sel = input.selection.trim();
     const ctx = input.nearbyContext.filter(Boolean).slice(0, 2);
     const preview = sel.length > 600 ? sel.slice(0, 600) + '…' : sel;
@@ -73,10 +89,15 @@ export class HttpProviderAdapter implements ProviderAdapter {
     private opts: { modelId: string; endpoint: string; apiKey: string },
   ) { this.id = opts.modelId; }
   async explain(input: ExplainInput): Promise<ExplainOutput> {
+    const history = (input.history ?? [])
+      .filter((t) => (t.role === 'user' || t.role === 'assistant') && typeof t.content === 'string' && t.content.trim().length > 0)
+      .slice(-20)
+      .map((t) => ({ role: t.role, content: t.content }));
     const body = {
       model: this.opts.modelId,
       messages: [
         { role: 'system', content: SYSTEM_RULE },
+        ...history,
         { role: 'user', content: `Title: ${input.title}\n\nPassage (L0):\n${input.selection}\n\nNearby context (L1):\n${input.nearbyContext.join('\n---\n')}\n\nRequest: ${input.userRequest}` },
       ],
       temperature: 0.3,
