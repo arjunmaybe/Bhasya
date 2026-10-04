@@ -126,6 +126,69 @@ function ExplainPopover({
 }
 
 /**
+ * Display normalization: model output commonly starts/ends with blank lines,
+ * which `white-space: pre-wrap` would otherwise render as dead vertical space
+ * above/below the answer (measured ~48px top / ~71px bottom in real Chrome —
+ * far larger than any CSS margin here, and unreachable via text-box-trim).
+ * Stripping edge blank lines only keeps the question and answer visually
+ * adjacent while preserving internal paragraph spacing exactly. Persistence
+ * is untouched: ids, thread state, and server content stay as stored.
+ */
+function trimMessageEdges(text: string): string {
+  return text.replace(/^(?:[ \t]*\r?\n)+/, '').replace(/(?:\r?\n[ \t]*)+$/, '');
+}
+
+/**
+ * Consumes one Bhasya thread SSE stream (`chunk` text events, then exactly
+ * one `done` event carrying the full result, or an `error` event). Calls
+ * onChunk per text event with no scrolling, timers, or polling — the caller
+ * decides all presentation. Throws on upstream errors, malformed endings,
+ * or a non-streamable response (the caller then uses the complete/wait path).
+ */
+async function consumeThreadStream(
+  response: Response,
+  onChunk: (text: string) => void,
+): Promise<any> {
+  if (!response.ok || !response.body) {
+    throw new Error(`stream unavailable: ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    for (;;) {
+      const { done: readerDone, value } = await reader.read();
+      if (readerDone) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split('\n\n');
+      buffer = blocks.pop() ?? '';
+      let event = '';
+      for (const block of blocks) {
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) {
+            const raw = line.slice(5).trimStart();
+            if (event === 'chunk') {
+              const text = (JSON.parse(raw) as { text?: unknown }).text;
+              if (typeof text === 'string' && text.length > 0) onChunk(text);
+            } else if (event === 'done') {
+              return JSON.parse(raw);
+            } else if (event === 'error') {
+              const msg = (JSON.parse(raw) as { error?: unknown }).error;
+              throw new Error(typeof msg === 'string' && msg.length > 0 ? msg : 'stream failed');
+            }
+          }
+        }
+        event = '';
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* already closed */ }
+  }
+  throw new Error('stream ended without result');
+}
+
+/**
  * Client Component: the interactive reading surface.
  * - text selection → passage identification → Explain popover
  * - anchor/highlight persistence, passage thread panel, citation navigation
@@ -135,6 +198,10 @@ function ExplainPopover({
  * openThreadId + activeAnchorId + activePassageId always move together so
  * passage A and passage B never share a panel, even when the provider
  * returns identical explanation text for both.
+ *
+ * Panel size is explicit UI state (panelMode compact/expanded), never
+ * inferred from DOM measurements. Explain expands; intentional article
+ * interaction compacts (thread preserved); close destroys the thread.
  */
 export function ReaderClient(props: {
   versionId: string;
@@ -154,30 +221,63 @@ export function ReaderClient(props: {
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [activeAnchorId, setActiveAnchorId] = useState<string | null>(null);
   const [activePassageId, setActivePassageId] = useState<string | null>(null);
+  /**
+   * Explicit panel state, never inferred from DOM measurements.
+   * - compact: reading-first sidebar; the article is the primary workspace.
+   * - expanded: temporary second workspace (~half the desktop viewport)
+   *   while the user actively interacts with a passage thread.
+   * Explain is the explicit compact -> expanded transition; intentional
+   * article interaction collapses expanded -> compact. Closing a thread is
+   * a separate operation (destroys thread state) and is not the same thing
+   * as compact mode (which preserves the thread).
+   */
+  const [panelMode, setPanelMode] = useState<'compact' | 'expanded'>('compact');
   const [messages, setMessages] = useState<Msg[]>([]);
   const [cites, setCites] = useState<Cite[]>([]);
   const [evidence, setEvidence] = useState<EvidenceDto[]>([]);
   const [threadSel, setThreadSel] = useState('');
   const [followup, setFollowup] = useState('');
+  // Progressive assistant text while a stream is open. Rendered as-is (no
+  // typing animation); cleared the moment the final message lands.
+  const [streamText, setStreamText] = useState('');
+  const [streaming, setStreaming] = useState(false);
   const [citeFlash, setCiteFlash] = useState<{ passageId: string; start: number; end: number } | null>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
+  const openThreadRef = useRef<string | null>(null);
   const docRef = useRef<HTMLDivElement>(null);
   // Dedicated ref to the thread conversation scroll container. Follow-up
-  // anchoring scrolls THIS element only, never the whole page.
+  // navigation scrolls THIS element only, never the whole page.
   const threadScrollRef = useRef<HTMLDivElement>(null);
   const followupInputRef = useRef<HTMLInputElement>(null);
-  // True while the conversation view sits near the bottom. Updated from the
-  // container's own scroll events so manual reading of older messages is
-  // never yanked away by unrelated renders.
-  const stickToBottomRef = useRef(true);
-  // Set on submit; consumed by the anchoring effect so the just-asked
-  // question/response becomes visible even if the user had scrolled up.
-  const justSubmittedRef = useRef(false);
+  // Exact newly created user-message id awaiting a one-shot reveal. Set from
+  // the follow-up POST response, consumed once that node has rendered.
+  // Null at all other times, so unrelated renders never force scrolling and
+  // manual reading of older messages is never overridden.
+  const pendingQuestionRef = useRef<string | null>(null);
+  // Passage id awaiting a one-shot Explain reveal. Set once the anchor
+  // resolves (authoritative passage, stable across the optimistic loading
+  // state and the authoritative thread/messages replacement), consumed once
+  // the newly created/activated passage thread has rendered. Null at all
+  // other times so streaming chunks and unrelated renders never scroll.
+  const pendingExplainRef = useRef<string | null>(null);
   const focusAfterSendRef = useRef(false);
   const citeFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => () => {
     if (citeFlashTimer.current) clearTimeout(citeFlashTimer.current);
   }, []);
+
+  useEffect(() => {
+    openThreadRef.current = openThreadId;
+  }, [openThreadId]);
+  useEffect(() => () => {
+    streamAbortRef.current?.abort();
+  }, []);
+
+  // Edge-trimmed preview of the in-flight assistant text. Same normalization
+  // as persisted messages, so the streamed preview never flashes blank space
+  // that the final message will not have.
+  const streamPreview = useMemo(() => trimMessageEdges(streamText), [streamText]);
 
   const passageMap = useMemo(() => new Map(passages.map((p) => [p.id, p])), [passages]);
   const hlByPassage = useMemo(() => {
@@ -208,36 +308,93 @@ export function ReaderClient(props: {
     docRef.current?.querySelectorAll('.passage.flash').forEach((el) => el.classList.remove('flash'));
   }, []);
 
-  const scrollToPassage = useCallback((passageId: string) => {
+  // Shared passage reveal: centers by default so returns to reading context
+  // (reopen, close, citations, highlight list) move the viewport as little as
+  // possible. Callers with a different reading position pass it explicitly —
+  // currently only the one-shot Explain navigation uses 'start'.
+  const scrollToPassage = useCallback((passageId: string, block: 'center' | 'start' = 'center') => {
     clearFlash();
     const el = docRef.current?.querySelector(`[data-passage-id="${passageId}"]`);
     if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.scrollIntoView({ behavior: 'smooth', block });
       el.classList.add('flash');
       setTimeout(() => el.classList.remove('flash'), 1700);
     }
   }, [clearFlash]);
 
-  // Conversation anchoring: scroll the conversation container itself to the
-  // newest content only when the user just submitted a follow-up, or when
-  // the view was already near the bottom. Manual reading of older messages
-  // is left alone. State-driven via messages/cites/openThreadId/busy, no
-  // arbitrary timeouts, and never scrolls the page to the passage here.
-  const handleThreadScroll = useCallback(() => {
-    const el = threadScrollRef.current;
-    if (!el) return;
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickToBottomRef.current = distance < 96;
-  }, []);
+  // Intentional article interaction collapses expanded -> compact WITHOUT
+  // touching thread state (thread, passage, messages, citations all stay).
+  // Scoped to the article surface only — never a document-level listener —
+  // and guarded so thread-adjacent clicks never collapse: highlight marks
+  // (which reopen threads), inline thread controls, selection controls, and
+  // an in-progress text selection (the start of an Explain flow).
+  const handleArticleClick = useCallback((e: React.MouseEvent) => {
+    if (!openThreadId) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest?.('mark.hl, .passage-threads, .passage-thread-link, .explain-pop, button, a')) return;
+    if (typeof window !== 'undefined' && (window.getSelection()?.toString().trim() ?? '') !== '') return;
+    setPanelMode('compact');
+  }, [openThreadId]);
 
+  // Compact reopen: clicking the compact thread surface (body/content)
+  // re-expands the SAME thread. Nothing is refetched, cleared, or toggled:
+  // openThreadId, passage, messages, citations, and scroll position all stay
+  // exactly as they were. Controls keep their normal actions (buttons,
+  // links, inputs, and the composer are excluded), and closeThread remains
+  // the only path that destroys thread state. Scoped to the thread card —
+  // never a document-level listener — so article selection is unaffected.
+  const handleCompactExpand = useCallback((e: React.MouseEvent) => {
+    if (panelMode !== 'compact' || !openThreadId) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest?.('button, a, input, form, select, textarea')) return;
+    setPanelMode('expanded');
+  }, [panelMode, openThreadId]);
+
+  // One-shot follow-up navigation: after the exact newly created user
+  // question has rendered, scroll the conversation container so that
+  // question sits near the upper part of the viewport with the forthcoming
+  // assistant answer directly beneath it. Runs only while a pending target
+  // exists, then clears it — never snaps to the absolute bottom and never
+  // overrides manual reading. DOM/state-synchronized via useLayoutEffect
+  // (no arbitrary timeouts), and only the conversation container scrolls.
   useLayoutEffect(() => {
-    const el = threadScrollRef.current;
-    if (!el || !openThreadId || messages.length === 0) return;
-    const shouldStick = justSubmittedRef.current || stickToBottomRef.current;
-    if (!shouldStick) return;
-    justSubmittedRef.current = false;
-    el.scrollTop = el.scrollHeight;
-  }, [messages, cites, openThreadId, busy]);
+    const targetId = pendingQuestionRef.current;
+    if (!targetId || !openThreadId) return;
+    const container = threadScrollRef.current;
+    if (!container) return;
+    const node = container.querySelector(`[data-message-id="${targetId}"]`);
+    if (!node || !(node instanceof HTMLElement)) return;
+    pendingQuestionRef.current = null;
+    const containerRect = container.getBoundingClientRect();
+    const nodeRect = node.getBoundingClientRect();
+    const placeAt = container.scrollTop + (nodeRect.top - containerRect.top)
+      - Math.round(container.clientHeight * 0.2);
+    container.scrollTop = Math.max(0, placeAt);
+  }, [messages, openThreadId]);
+
+  // One-shot Explain navigation: after an Explain request creates/activates
+  // its passage thread, bring that active passage to the top of the reading
+  // viewport (block 'start', honoring the passage scroll-margin) so a
+  // selection near the bottom lands fully in the useful reading area with
+  // its thread context beneath it, instead of stopping halfway up. Runs only
+  // while a pending Explain target exists and the authoritative thread has
+  // rendered, then clears it — never per streamed chunk and never overriding
+  // manual reading. DOM/state-synchronized via useLayoutEffect (no timers),
+  // and reuses the existing passage target/ref structure.
+  useLayoutEffect(() => {
+    const passageId = pendingExplainRef.current;
+    if (!passageId || !openThreadId) return;
+    // Only the currently active passage/thread navigates; a superseded
+    // Explain keeps waiting for its own activation instead of scrolling stale.
+    if (activePassageId !== passageId) return;
+    // Authoritative thread DOM must exist (thread card hosts the scroll
+    // container); otherwise wait for the next state update — do not clear.
+    if (!threadScrollRef.current) return;
+    const passageEl = docRef.current?.querySelector(`[data-passage-id="${passageId}"]`);
+    if (!passageEl) return;
+    pendingExplainRef.current = null;
+    scrollToPassage(passageId, 'start');
+  }, [messages, highlights, openThreadId, activePassageId]);
 
   // Return keyboard focus to the composer after a follow-up round-trips,
   // once the input is enabled again. State-driven, no timeouts.
@@ -300,6 +457,13 @@ export function ReaderClient(props: {
   }, []);
 
   function clearThreadState() {
+    // An in-flight stream belongs to the closing thread: abort it so a late
+    // completion can never repopulate cleared state.
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+    pendingExplainRef.current = null;
+    setStreamText('');
+    setStreaming(false);
     setOpenThreadId(null);
     setActiveAnchorId(null);
     setActivePassageId(null);
@@ -310,14 +474,28 @@ export function ReaderClient(props: {
     setFollowup('');
   }
 
+  // Closing DESTROYS thread state — distinct from compact mode, which
+  // preserves the thread. With no open thread the panel returns to baseline.
   function closeThread(returnToReading: boolean) {
     const passageId = activePassageId;
     clearThreadState();
+    setPanelMode('compact');
     if (returnToReading && passageId) {
       // Closing returns naturally to reading: bring the passage back into view.
       setTimeout(() => scrollToPassage(passageId), 30);
     }
   }
+
+  // Single ingestion point for thread detail responses: message contents
+  // are edge-trimmed for display only (see trimMessageEdges). Ids, roles,
+  // model ids, citations, and evidence pass through untouched.
+  const applyThreadDetail = useCallback((detail: {
+    messages: Msg[]; citations: Cite[]; evidence: EvidenceDto[];
+  }) => {
+    setMessages(detail.messages.map((m) => ({ ...m, content: trimMessageEdges(m.content) })));
+    setCites(detail.citations ?? []);
+    setEvidence(detail.evidence ?? []);
+  }, []);
 
   async function openThread(threadId: string, anchorSelectedText?: string) {
     setError('');
@@ -335,9 +513,9 @@ export function ReaderClient(props: {
         thread: { id: string }; messages: Msg[]; citations: Cite[]; evidence: EvidenceDto[];
       };
       setOpenThreadId(threadId);
-      setMessages(r.messages);
-      setCites(r.citations ?? []);
-      setEvidence(r.evidence ?? []);
+      applyThreadDetail(r);
+      // Explicitly entering a thread makes it the active workspace.
+      setPanelMode('expanded');
       if (anchorSelectedText) setThreadSel(anchorSelectedText);
       else if (hl?.selected_text) setThreadSel(hl.selected_text);
       // Reopening returns to its passage context.
@@ -353,6 +531,38 @@ export function ReaderClient(props: {
     const selectedPassageId = pending.passageId;
     setBusy(true);
     setError('');
+    // Shared completion: identical thread state whether the answer streamed
+    // progressively or arrived via the complete/wait fallback.
+    const finishExplain = async (anchor: { anchorId: string; passageId: string }, threadId: string) => {
+      const detail = (await browserReq(`/api/threads/${threadId}`)) as {
+        messages: Msg[]; citations: Cite[]; evidence: EvidenceDto[];
+      };
+      setHighlights((prev) =>
+        prev.some((h) => h.anchor_id === anchor.anchorId)
+          ? prev
+          : [...prev, {
+            highlight_id: `local-${anchor.anchorId}`, anchor_id: anchor.anchorId,
+            selected_text: selectedText, structural_path: '', passage_id: anchor.passageId,
+            thread_id: threadId,
+          }],
+      );
+      setPending(null);
+      window.getSelection()?.removeAllRanges();
+      // Key the panel to this exact anchor/passage/thread triple. The passage
+      // excerpt is shown verbatim so two passages stay distinct contexts even
+      // when the provider returns identical explanation text.
+      setOpenThreadId(threadId);
+      setActiveAnchorId(anchor.anchorId);
+      setActivePassageId(anchor.passageId ?? selectedPassageId);
+      applyThreadDetail(detail);
+      // Explain is the explicit compact -> expanded transition.
+      setPanelMode('expanded');
+      setThreadSel(selectedText);
+      // Refresh authoritative highlight list (survives reload).
+      browserReq(`/api/documents/${versionId}/highlights`)
+        .then((r: any) => setHighlights(r.highlights))
+        .catch(() => {});
+    };
     try {
       const anchor = (await browserReq('/api/anchors/resolve', {
         method: 'POST',
@@ -362,39 +572,60 @@ export function ReaderClient(props: {
           passageId: pending.passageId ?? undefined,
         }),
       })) as { anchorId: string; passageId: string };
-      const result = (await browserReq('/api/threads/explain', {
-        method: 'POST',
-        body: JSON.stringify({ anchorId: anchor.anchorId }),
-      })) as { threadId: string; citationIds: string[] };
-      const detail = (await browserReq(`/api/threads/${result.threadId}`)) as {
-        messages: Msg[]; citations: Cite[]; evidence: EvidenceDto[];
-      };
-      setHighlights((prev) =>
-        prev.some((h) => h.anchor_id === anchor.anchorId)
-          ? prev
-          : [...prev, {
-            highlight_id: `local-${anchor.anchorId}`, anchor_id: anchor.anchorId,
-            selected_text: selectedText, structural_path: '', passage_id: anchor.passageId,
-            thread_id: result.threadId,
-          }],
-      );
-      setPending(null);
-      window.getSelection()?.removeAllRanges();
-      // Key the panel to this exact anchor/passage/thread triple. The passage
-      // excerpt is shown verbatim so two passages stay distinct contexts even
-      // when the provider returns identical explanation text.
-      setOpenThreadId(result.threadId);
-      setActiveAnchorId(anchor.anchorId);
-      setActivePassageId(anchor.passageId ?? selectedPassageId);
-      setMessages(detail.messages);
-      setCites(detail.citations ?? []);
-      setEvidence(detail.evidence ?? []);
-      setThreadSel(selectedText);
-      // Refresh authoritative highlight list (survives reload).
-      browserReq(`/api/documents/${versionId}/highlights`)
-        .then((r: any) => setHighlights(r.highlights))
-        .catch(() => {});
+      // Arm the one-shot Explain navigation to the authoritative passage.
+      // Stable across the optimistic loading state and the authoritative
+      // thread/messages replacement; cleared on abort/failure so no stale
+      // target ever navigates.
+      const explainPassageId = anchor.passageId ?? selectedPassageId;
+      if (explainPassageId) pendingExplainRef.current = explainPassageId;
+      // Prefer the streaming path so first useful text appears as generated.
+      // Falls back to the complete/wait path when streaming is unavailable.
+      const ctrl = new AbortController();
+      streamAbortRef.current = ctrl;
+      const isCurrent = () => streamAbortRef.current === ctrl && !ctrl.signal.aborted;
+      let receivedAny = false;
+      try {
+        setStreaming(true);
+        setStreamText('');
+        const res = await fetch(`${browserApiBase()}/api/threads/explain/stream`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ anchorId: anchor.anchorId }),
+          signal: ctrl.signal,
+        });
+        const done = (await consumeThreadStream(res, (t) => {
+          receivedAny = true;
+          // No scrolling here: the loading state already anchors the panel,
+          // and the one-shot navigation reveals the finished thread.
+          setStreamText((prev) => prev + t);
+        })) as { threadId: string };
+        if (!isCurrent()) {
+          pendingExplainRef.current = null;
+          return;
+        }
+        streamAbortRef.current = null;
+        setStreamText('');
+        setStreaming(false);
+        await finishExplain(anchor, String(done.threadId));
+      } catch (streamErr) {
+        if (!isCurrent()) {
+          pendingExplainRef.current = null;
+          return;
+        }
+        streamAbortRef.current = null;
+        setStreamText('');
+        setStreaming(false);
+        if (receivedAny) throw streamErr;
+        // Complete/wait fallback: same result, shown all at once.
+        const result = (await browserReq('/api/threads/explain', {
+          method: 'POST',
+          body: JSON.stringify({ anchorId: anchor.anchorId }),
+        })) as { threadId: string; citationIds: string[] };
+        await finishExplain(anchor, result.threadId);
+      }
     } catch (e) {
+      // No real thread exists here: never leave a misleading scroll target.
+      pendingExplainRef.current = null;
       setError(e instanceof Error ? e.message : 'explanation failed');
     } finally {
       setBusy(false);
@@ -439,27 +670,76 @@ export function ReaderClient(props: {
   async function sendFollowup(e: React.FormEvent) {
     e.preventDefault();
     if (!openThreadId || !followup.trim() || busy) return;
-    // Anchor the conversation to this new interaction: the anchoring effect
-    // consumes this flag when the fresh messages land.
-    justSubmittedRef.current = true;
-    stickToBottomRef.current = true;
+    const threadId = openThreadId;
+    const content = followup.trim();
+    // The exact question appears immediately with a client-local id; the
+    // one-shot navigation effect reveals THAT node, and the authoritative
+    // server message replaces it below without moving the user.
+    const tempId = `pending-${Date.now()}`;
+    pendingQuestionRef.current = tempId;
     focusAfterSendRef.current = true;
     setBusy(true);
     setError('');
-    try {
-      await browserReq(`/api/threads/${openThreadId}/messages`, {
-        method: 'POST',
-        body: JSON.stringify({ content: followup.trim() }),
-      });
-      const detail = (await browserReq(`/api/threads/${openThreadId}`)) as {
+    setFollowup('');
+    setMessages((prev) => [...prev, { id: tempId, role: 'user', content, model_id: null }]);
+    // Shared completion: reconcile with authoritative server state, then
+    // anchor the conversation to the real persisted question.
+    const finishFollowup = async (userMessageId: string) => {
+      const detail = (await browserReq(`/api/threads/${threadId}`)) as {
         messages: Msg[]; citations: Cite[]; evidence: EvidenceDto[];
       };
-      setMessages(detail.messages);
-      setCites(detail.citations ?? []);
-      setEvidence(detail.evidence ?? []);
-      setFollowup('');
+      if (openThreadRef.current !== threadId) return;
+      applyThreadDetail(detail);
+      pendingQuestionRef.current = userMessageId;
+    };
+    try {
+      // Prefer streaming: the assistant answer accumulates below the exact
+      // question as it is generated. Falls back to the complete/wait path
+      // when streaming is unavailable before any chunk arrives.
+      const ctrl = new AbortController();
+      streamAbortRef.current = ctrl;
+      const isCurrent = () => streamAbortRef.current === ctrl && !ctrl.signal.aborted;
+      let receivedAny = false;
+      try {
+        setStreaming(true);
+        setStreamText('');
+        const res = await fetch(`${browserApiBase()}/api/threads/${threadId}/messages/stream`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ content }),
+          signal: ctrl.signal,
+        });
+        const done = (await consumeThreadStream(res, (t) => {
+          receivedAny = true;
+          // No scrolling per chunk: the question stays anchored where the
+          // one-shot navigation placed it; text grows beneath it.
+          setStreamText((prev) => prev + t);
+        })) as { userMessageId: string };
+        if (!isCurrent()) return;
+        streamAbortRef.current = null;
+        setStreamText('');
+        setStreaming(false);
+        await finishFollowup(String(done.userMessageId));
+      } catch (streamErr) {
+        if (!isCurrent()) return;
+        streamAbortRef.current = null;
+        setStreamText('');
+        setStreaming(false);
+        if (receivedAny) {
+          // Partial answer was never persisted server-side: reconcile to the
+          // persisted question, then surface the interruption.
+          await finishFollowup(tempId).catch(() => {});
+          throw streamErr;
+        }
+        // Complete/wait fallback: same result, shown all at once.
+        const posted = (await browserReq(`/api/threads/${threadId}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({ content }),
+        })) as { userMessageId: string };
+        if (posted?.userMessageId) await finishFollowup(String(posted.userMessageId));
+      }
     } catch (e2) {
-      justSubmittedRef.current = false;
+      pendingQuestionRef.current = null;
       focusAfterSendRef.current = false;
       setError(e2 instanceof Error ? e2.message : 'message failed');
     } finally {
@@ -488,13 +768,29 @@ export function ReaderClient(props: {
     };
   }
 
-  // Index of the newest user question, so it stays easy to spot with a
+  // Id of the newest user question, so it stays easy to spot with a
   // restrained marker. Derived from state, no extra network or DOM reads.
-  const lastUserIdx = useMemo(() => {
+  const lastUserId = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i]?.role === 'user') return i;
+      if (messages[i]?.role === 'user') return messages[i].id;
     }
-    return -1;
+    return null;
+  }, [messages]);
+
+  // Exchange grouping: each user question plus its immediately following
+  // assistant message(s) render as one continuous exchange with a small
+  // internal gap; separate exchanges keep a larger separation. Grouping is
+  // purely presentational — message nodes keep their own data-message-id so
+  // exact-question scroll targeting is unchanged.
+  interface Exchange { key: string; messages: Msg[] }
+  const exchanges: Exchange[] = useMemo(() => {
+    const groups: Exchange[] = [];
+    for (const m of messages) {
+      const last = groups[groups.length - 1];
+      if (m.role === 'user' || !last) groups.push({ key: m.id, messages: [m] });
+      else last.messages.push(m);
+    }
+    return groups;
   }, [messages]);
 
   // Citations grouped by assistant message via Evidence:
@@ -564,8 +860,11 @@ export function ReaderClient(props: {
   const activePassage = activePassageId ? passageMap.get(activePassageId) ?? null : null;
 
   return (
-    <div className="reader">
-      <article className="doc" ref={docRef} aria-label="Document reading view">
+    <div
+      className={panelMode === 'expanded' ? 'reader reader-expanded' : 'reader'}
+      data-panel={panelMode}
+    >
+      <article className="doc" ref={docRef} aria-label="Document reading view" onClick={handleArticleClick}>
         <div className="doc-inner">
           <header className="doc-header">
             <h1>{title}</h1>
@@ -644,6 +943,7 @@ export function ReaderClient(props: {
         {openThreadId ? (
           <div
             className="thread-card"
+            onClick={handleCompactExpand}
             key={openThreadId}
             data-thread-id={openThreadId}
             data-passage-id={activePassageId ?? ''}
@@ -671,22 +971,28 @@ export function ReaderClient(props: {
               role="log"
               aria-label="Passage thread messages"
               data-testid="thread-scroll"
-              onScroll={handleThreadScroll}
             >
-              {messages.map((m, idx) => (
-                <div key={m.id}>
-                  {m.role === 'user' ? (
-                    <div
-                      className={idx === lastUserIdx ? 'msg-user msg-user-latest' : 'msg-user'}
-                      data-latest={idx === lastUserIdx ? 'true' : undefined}
-                    >{m.content}</div>
-                  ) : (
-                    <>
-                      <div className="msg-ai">{m.content}</div>
-                      <div className="meta">model: {m.model_id ?? 'unknown'}</div>
-                      {renderCitations(citesByMessage.get(m.id) ?? [])}
-                    </>
-                  )}
+              {exchanges.map((ex, exIdx) => (
+                <div key={ex.key} className="msg-exchange">
+                  {ex.messages.map((m) => (
+                    <div key={m.id} data-message-id={m.id}>
+                      {m.role === 'user' ? (
+                        <div
+                          className={m.id === lastUserId ? 'msg-user msg-user-latest' : 'msg-user'}
+                          data-latest={m.id === lastUserId ? 'true' : undefined}
+                        >{m.content}</div>
+                      ) : (
+                        <>
+                          <div className="msg-ai">{m.content}</div>
+                          <div className="meta">model: {m.model_id ?? 'unknown'}</div>
+                          {renderCitations(citesByMessage.get(m.id) ?? [])}
+                        </>
+                      )}
+                    </div>
+                  ))}
+                  {streaming && streamPreview && exIdx === exchanges.length - 1 ? (
+                    <div className="msg-ai" data-streaming="true">{streamPreview}</div>
+                  ) : null}
                 </div>
               ))}
               {ungroupedCites.length > 0 ? renderCitations(ungroupedCites) : null}
@@ -723,6 +1029,9 @@ export function ReaderClient(props: {
               <div className="meta">Preparing explanation</div>
               {pending ? <div className="sel">“{pending.text.slice(0, 280)}”</div> : null}
             </div>
+            {streamPreview ? (
+              <div className="msg-ai" data-streaming="true">{streamPreview}</div>
+            ) : null}
             <div className="thread-loading" data-testid="thread-loading">
               <div className="skeleton skeleton-line" />
               <div className="skeleton skeleton-line short" />

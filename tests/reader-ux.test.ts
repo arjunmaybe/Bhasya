@@ -167,7 +167,8 @@ describe('reader UX: citation is findable and navigates to the passage', () => {
     expect(src).toMatch(/\/api\/citations\/\$\{citeId\}/);
     expect(src).toMatch(/citationTargetPassageId\(r\.citation\)/);
     expect(src).toMatch(/scrollToPassage\(passageId\)/);
-    expect(src).toMatch(/scrollIntoView\(\{ behavior: 'smooth', block: 'center' \}\)/);
+    expect(src).toMatch(/el\.scrollIntoView\(\{ behavior: 'smooth', block \}\)/);
+    expect(src).toMatch(/block: 'center' \| 'start' = 'center'/);
     expect(src).toMatch(/data-passage-id/);
   });
 });

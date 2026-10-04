@@ -14,7 +14,8 @@ describe('reader active context: thread/anchor/passage stay keyed together', () 
     expect(s).toMatch(/activePassageId/);
     expect(s).toMatch(/setActiveAnchorId\(anchor\.anchorId\)/);
     expect(s).toMatch(/setActivePassageId\(anchor\.passageId/);
-    expect(s).toMatch(/setOpenThreadId\(result\.threadId\)/);
+    // Shared explain completion opens the exact thread (streamed or fallback).
+    expect(s).toMatch(/setOpenThreadId\(threadId\)/);
   });
 
   it('keys the panel to the thread so A and B never share UI state', () => {

@@ -25,12 +25,30 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .source-list .t { font-size: 17px; }
 .source-list .u { font-size: 12px; color: #888; font-family: system-ui, sans-serif; }
 
-/* Reader layout: focused reading column plus restrained contextual panel.
-   Panel scales with the viewport (420-520px on desktop) so prose and the
-   passage excerpt read at a comfortable measure. Single column on narrow
-   screens so nothing overflows horizontally. */
-.reader { display: grid; grid-template-columns: minmax(0, 1fr) clamp(420px, 34vw, 520px); gap: 24px; align-items: start; min-width: 0; max-width: 100%; }
-@media (max-width: 900px) { .reader { grid-template-columns: minmax(0, 1fr); } }
+/* Reader layout: reading-first. Compact panel is a restrained sidebar;
+   expanded panel is a temporary second workspace (~half the desktop
+   viewport) while the user actively interacts with a passage thread.
+   Single column on narrow screens so nothing overflows horizontally. */
+.reader { display: grid; grid-template-columns: minmax(0, 1fr) clamp(340px, 28vw, 400px); gap: 24px; align-items: start; min-width: 0; max-width: 100%; }
+@media (min-width: 901px) {
+  .reader-expanded { grid-template-columns: minmax(0, 1fr) clamp(520px, 48vw, 720px); }
+  .shell:has(.reader-expanded) { max-width: 1440px; }
+}
+/* Expanded excerpt gets comfortable width and vertical room; it is plain
+   flow content, never a tiny independent scroll box. */
+.reader-expanded .thread-card .sel { font-size: 15px; line-height: 1.7; }
+/* Compact thread with an open conversation is reopenable: the surface
+   signals clickability, while controls keep their own cursors/actions. */
+.reader[data-panel="compact"] .thread-card { cursor: pointer; }
+@media (max-width: 900px) {
+  .reader, .reader-expanded { grid-template-columns: minmax(0, 1fr); }
+  .reader-expanded .thread-card { max-height: 82vh; }
+  /* Mobile-expanded excerpt: capped at ~4 lines (4 x 1.7em line-height) with
+     its own internal scroll, so the flex-none thread header stays compact
+     and the conversation keeps a readable viewport. Verbatim text preserved
+     (no ellipsis/clamp); desktop excerpt above stays plain flow content. */
+  .reader-expanded .thread-card .sel { max-height: 6.8em; overflow-y: auto; overscroll-behavior: contain; }
+}
 .doc { background: #fff; border: 1px solid #e3ded2; border-radius: 6px; padding: 32px; min-width: 0; max-width: 100%; overflow-wrap: break-word; }
 @media (max-width: 640px) { .doc { padding: 20px; } }
 .doc-inner { max-width: 68ch; margin: 0 auto; min-width: 0; }
@@ -70,6 +88,14 @@ mark.cite-flash { background: #ccfbf1; outline: 2px solid #0f766e; border-radius
    the editorial left marker used elsewhere. No loud UI. */
 .thread-card .msg-user-latest { background: #e9e5d8; border-left: 3px solid #1a1a1a; padding-left: 9px; }
 .thread-card .msg-ai { font-size: 14px; line-height: 1.65; white-space: pre-wrap; margin: 8px 0 4px; }
+/* Exchange grouping: a user question and its immediately following assistant
+   answer read as one continuous exchange (small internal gap), while separate
+   exchanges keep a larger separation. Line-height and paragraph spacing inside
+   each message are untouched. */
+.thread-card .msg-exchange { margin: 16px 0 0; }
+.thread-card .msg-exchange:first-child { margin-top: 4px; }
+.thread-card .msg-exchange .msg-user { margin: 0 0 6px; }
+.thread-card .msg-exchange .msg-ai { margin: 0 0 4px; }
 .thread-context { margin-top: 8px; }
 .thread-context-btn { font-size: 12px; }
 .thread-actions { display: flex; gap: 8px; }
