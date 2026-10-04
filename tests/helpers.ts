@@ -40,3 +40,33 @@ export async function ingestSample(svc: Services, identity: { userId: string; wo
   const { ingestSource } = await import('../apps/api/src/services.js');
   return ingestSource(svc, identity, 'https://example.com/craft-of-reading', { dnsResolve: publicDns });
 }
+
+/**
+ * Every key ModelRouter.fromEnv consults. Tests asserting default selection
+ * must scrub these so they stay deterministic regardless of the shell that
+ * runs vitest (e.g. a benchmark shell exporting provider keys). Restored
+ * afterwards; same save/restore pattern as the auth/storage tests.
+ */
+export const PROVIDER_ENV_KEYS = [
+  'BHASYA_PROVIDER',
+  'BHASYA_MODEL_API_KEY', 'BHASYA_MODEL_ID', 'BHASYA_MODEL_ENDPOINT',
+  'BHASYA_MODEL_MAX_TOKENS', 'BHASYA_MODEL_REASONING_EFFORT', 'BHASYA_MODEL_INCLUDE_REASONING',
+  'BHASYA_MODEL_PROVIDER_SORT', 'BHASYA_MODEL_ALLOW_FALLBACKS',
+  'GEMINI_API_KEY', 'GEMINI_MODEL_ID', 'GEMINI_MAX_TOKENS', 'GEMINI_THINKING_LEVEL', 'GEMINI_API_ENDPOINT',
+  'GROQ_API_KEY', 'GROQ_MODEL_ID', 'GROQ_MAX_TOKENS', 'GROQ_REASONING_EFFORT', 'GROQ_API_ENDPOINT',
+];
+
+/** Removes provider/model keys from process.env; returns a restore function. */
+export function scrubProviderEnv(): () => void {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of PROVIDER_ENV_KEYS) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  return () => {
+    for (const k of PROVIDER_ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  };
+}

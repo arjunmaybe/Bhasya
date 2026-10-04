@@ -63,3 +63,4 @@ export async function retrieveExplainContext(
 }
 
 export * from './providers.js';
+export * from './latency.js';

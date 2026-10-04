@@ -3,7 +3,8 @@ import { cors } from 'hono/cors';
 import { getAuthForDb, getIdentityForRequest } from '@bhasya/db';
 import { logEvent } from '@bhasya/db';
 import { HttpError, authorize } from '../../../authorization/resource-resolvers.js';
-import { explainSelection, getServices, ingestSource, reingestSource, resolveAnchor } from './services.js';
+import { explainSelection, getServices, ingestSource, reingestSource, resolveAnchor, streamExplainSelection } from './services.js';
+import type { ExplainArgs, ExplainStreamEvent, Identity } from './services.js';
 import { CreateHighlightSchema, CreateThreadSchema, ExplainSchema, IngestSchema, PostMessageSchema, ResolveAnchorSchema } from './schema.js';
 import { withTransaction } from '../../../db/transactions.js';
 
@@ -209,6 +210,63 @@ export function createApp(): Hono {
     } catch (e) { return err(c, e); }
   });
 
+  /**
+   * Streaming explain (SSE). Auth + validation stay JSON with normal status
+   * codes; only the established stream emits events: `chunk` (incremental
+   * assistant text), then exactly one `done` (full result + telemetry), or
+   * a single `error` when the stream itself fails. Persistence semantics are
+   * identical to the non-streaming route (see streamExplainSelection).
+   */
+  const streamExplainEvents = (
+    svc: Awaited<ReturnType<typeof getServices>>,
+    identity: Identity,
+    args: ExplainArgs,
+  ): Response => {
+    const enc = new TextEncoder();
+    let finished = false;
+    const send = (controller: ReadableStreamDefaultController, event: string, data: unknown): void => {
+      controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+    };
+    const stream = new ReadableStream({
+      async start(controller) {
+        const sink = async (ev: ExplainStreamEvent): Promise<void> => {
+          if (ev.type === 'chunk') send(controller, 'chunk', { text: ev.text });
+          else {
+            finished = true;
+            send(controller, 'done', { ...ev.result, telemetry: ev.telemetry });
+          }
+        };
+        try {
+          await streamExplainSelection(svc, identity, args, sink);
+        } catch (e) {
+          if (!finished) {
+            const msg = e instanceof Error ? e.message : 'internal error';
+            send(controller, 'error', { error: msg });
+          }
+        }
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      },
+    });
+  };
+
+  app.post('/api/threads/explain/stream', async (c) => {
+    try {
+      const svc = await getServices();
+      const identity = await getIdentityForRequest(svc.db, c.req.raw.headers, { env: ((c as unknown as { env?: Record<string, unknown> }).env ?? {}) });
+      if (!identity) return c.json({ error: 'unauthenticated' }, 401);
+      const parsed = ExplainSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: 'invalid request' }, 400);
+      return streamExplainEvents(svc, identity, parsed.data);
+    } catch (e) { return err(c, e); }
+  });
+
   app.post('/api/threads/:id/messages', async (c) => {
     try {
       const svc = await getServices();
@@ -223,6 +281,22 @@ export function createApp(): Hono {
       const out = await explainSelection(svc, identity, { anchorId: String(trow.anchor_id), question: parsed.data.content, threadId });
       void resolved;
       return c.json(out, 201);
+    } catch (e) { return err(c, e); }
+  });
+
+  app.post('/api/threads/:id/messages/stream', async (c) => {
+    try {
+      const svc = await getServices();
+      const identity = await getIdentityForRequest(svc.db, c.req.raw.headers, { env: ((c as unknown as { env?: Record<string, unknown> }).env ?? {}) });
+      if (!identity) return c.json({ error: 'unauthenticated' }, 401);
+      const parsed = PostMessageSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: 'invalid request' }, 400);
+      const threadId = c.req.param('id');
+      const resolved = await authorize(svc.db, identity, 'thread', threadId);
+      const trow = (await svc.db.query(`SELECT anchor_id FROM threads WHERE id = $1`, [threadId])).rows[0] as any;
+      if (!trow?.anchor_id) return c.json({ error: 'thread has no anchor' }, 400);
+      void resolved;
+      return streamExplainEvents(svc, identity, { anchorId: String(trow.anchor_id), question: parsed.data.content, threadId });
     } catch (e) { return err(c, e); }
   });
 

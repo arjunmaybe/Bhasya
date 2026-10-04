@@ -4,7 +4,8 @@ import {
   LocalStorageAdapter, MemoryStorageAdapter, R2StorageAdapter, SupabaseStorageAdapter,
   isProductionAuth, type DbClient, type StoragePort, type R2BucketLike,
 } from '@bhasya/db';
-import { ModelRouter, retrieveExplainContext } from '@bhasya/ai';
+import { ModelRouter, estimateExplainInputSize, retrieveExplainContext } from '@bhasya/ai';
+import type { StreamTelemetry } from '@bhasya/ai';
 import { withTransaction } from '../../../db/transactions.js';
 import { authorize } from '../../../authorization/resource-resolvers.js';
 
@@ -340,11 +341,32 @@ export async function resolveAnchor(
   return { anchorId: String(row.id), passageId: found.passage.id, nodeId: found.passage.nodeId, startOffset: anchor.startOffset, endOffset: anchor.endOffset };
 }
 
-/** Explain: tx(create state) → model call OUTSIDE tx → tx(persist result). */
-export async function explainSelection(
-  svc: Services, identity: Identity,
-  args: { anchorId: string; question?: string; threadId?: string },
-): Promise<{ threadId: string; userMessageId: string; assistantMessageId: string; text: string; modelId: string; citationIds: string[] }> {
+export interface ExplainResult {
+  threadId: string; userMessageId: string; assistantMessageId: string;
+  text: string; modelId: string; citationIds: string[];
+}
+
+export interface ExplainArgs { anchorId: string; question?: string; threadId?: string }
+
+interface PreparedExplain {
+  resolved: { workspaceId: string };
+  arow: any;
+  ctx: { l0: { id: string; structuralPath: string; text: string }; l1: Array<{ id: string; text: string }> };
+  question: string;
+  title: string;
+  created: { threadId: string; userMessageId: string; isNew: boolean };
+  history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  input: { selection: string; nearbyContext: string[]; userRequest: string; title: string; history: Array<{ role: 'user' | 'assistant'; content: string }> };
+}
+
+/**
+ * Shared preparation for explain paths (TX1 + retrieval + history + input).
+ * No network/model work inside: thread + user message persist first, then
+ * the provider is called OUTSIDE any transaction by the caller.
+ */
+async function prepareExplainState(
+  svc: Services, identity: Identity, args: ExplainArgs,
+): Promise<PreparedExplain> {
   const resolved = await authorize(svc.db, identity, 'anchor', args.anchorId);
   const arow = (await svc.db.query(
     `SELECT a.*, s.workspace_id AS ws FROM anchors a
@@ -409,10 +431,6 @@ export async function explainSelection(
     .map((r) => ({ role: r.role as 'user' | 'assistant', content: String(r.content ?? '') }))
     .filter((t) => t.content.trim().length > 0);
 
-  // ── MODEL WORK OUTSIDE ANY TRANSACTION ──
-  // Phase 2 validation: time the AI call so latency is measurable from the
-  // existing thread events (metadata only — never prompts/responses/content).
-  const explainStartedAt = Date.now();
   // The explanation is about the user's exact persisted selection. The full
   // passage text stays available as grounding context (first L1 entry) so the
   // explanation remains grounded in its passage when the selection is a slice
@@ -420,20 +438,31 @@ export async function explainSelection(
   // unexpectedly empty (resolveAnchor normally rejects empty selections).
   const exactSelection = String(arow.selected_text ?? '').trim();
   const selection = exactSelection.length > 0 ? exactSelection : ctx.l0.text;
-  const out = await svc.router.explain({
+  const title = String(titleRow?.title ?? '');
+  const input = {
     selection,
     nearbyContext: [ctx.l0.text, ...ctx.l1.map((p) => p.text)],
     userRequest: question,
-    title: String(titleRow?.title ?? ''),
+    title,
     history,
-  });
-  const explainDurationMs = Date.now() - explainStartedAt;
+  };
+  return { resolved, arow, ctx, question, title, created, history, input };
+}
 
-  // ── TX 2: assistant message + evidence + citations + highlight + events ──
-  const persisted = await withTransaction(svc.db, async (tx) => {
+/**
+ * Shared TX 2: assistant message + evidence + citations + highlight.
+ * Identical for streaming and non-streaming paths: persistence always covers
+ * the final complete text, never partial chunks.
+ */
+async function persistAssistantResult(
+  svc: Services, identity: Identity, prep: PreparedExplain, args: ExplainArgs,
+  text: string, modelId: string,
+): Promise<{ assistantMessageId: string; citationIds: string[] }> {
+  const { arow, ctx, created, resolved } = prep;
+  return withTransaction(svc.db, async (tx) => {
     const mrow = (await tx.query(
       `INSERT INTO thread_messages (thread_id, role, content, model_id, created_by) VALUES ($1,'assistant',$2,$3,$4) RETURNING id`,
-      [created.threadId, out.text, out.modelId, identity.userId],
+      [created.threadId, text, modelId, identity.userId],
     )).rows[0] as any;
     const assistantId = String(mrow.id);
     const evL0 = (await tx.query(
@@ -464,23 +493,130 @@ export async function explainSelection(
     await tx.query(`UPDATE threads SET updated_at = now() WHERE id = $1`, [created.threadId]);
     return { assistantMessageId: assistantId, citationIds };
   });
+}
 
+/**
+ * Shared event logging for explain paths.
+ * Validation metadata only: model identity + latency + input/output sizes.
+ * No prompts, responses, document text, or personal data (see DATA/PRIVACY).
+ */
+async function logExplainEvents(
+  svc: Services, identity: Identity, prep: PreparedExplain, args: ExplainArgs,
+  metadata: Record<string, string | number>,
+): Promise<void> {
+  const { created } = prep;
   await logEvent(svc.db, {
-    workspaceId: resolved.workspaceId, userId: identity.userId,
+    workspaceId: prep.resolved.workspaceId, userId: identity.userId,
     eventType: created.isNew && !args.threadId ? 'thread_created' : 'thread_message_sent',
     resourceType: 'thread', resourceId: created.threadId,
-    // Validation metadata only: model identity + latency. No prompts,
-    // responses, document text, or personal data (see DATA/PRIVACY rule).
-    metadata: { anchorId: args.anchorId, modelId: out.modelId, durationMs: explainDurationMs },
+    metadata: { anchorId: args.anchorId, ...metadata },
   });
   await logEvent(svc.db, {
-    workspaceId: resolved.workspaceId, userId: identity.userId, eventType: 'passage_highlighted',
+    workspaceId: prep.resolved.workspaceId, userId: identity.userId, eventType: 'passage_highlighted',
     resourceType: 'anchor', resourceId: args.anchorId, metadata: { threadId: created.threadId },
   });
+}
 
+/** Explain: tx(create state) → model call OUTSIDE tx → tx(persist result). */
+export async function explainSelection(
+  svc: Services, identity: Identity,
+  args: ExplainArgs,
+): Promise<ExplainResult> {
+  const requestStart = Date.now();
+  const prep = await prepareExplainState(svc, identity, args);
+  // Phase 2 validation: time the AI call so latency is measurable from the
+  // existing thread events (metadata only — never prompts/responses/content).
+  const explainStartedAt = Date.now();
+  const out = await svc.router.explain(prep.input);
+  const explainDurationMs = Date.now() - explainStartedAt;
+  const persisted = await persistAssistantResult(svc, identity, prep, args, out.text, out.modelId);
+  const size = estimateExplainInputSize(prep.input);
+  await logExplainEvents(svc, identity, prep, args, {
+    modelId: out.modelId,
+    durationMs: explainDurationMs,
+    totalMs: Date.now() - requestStart,
+    inputChars: size.inputChars,
+    inputTokenEstimate: size.inputTokenEstimate,
+    outputChars: out.text.length,
+  });
   return {
-    threadId: created.threadId, userMessageId: created.userMessageId,
+    threadId: prep.created.threadId, userMessageId: prep.created.userMessageId,
     assistantMessageId: persisted.assistantMessageId, text: out.text,
     modelId: out.modelId, citationIds: persisted.citationIds,
   };
+}
+
+export type ExplainStreamEvent =
+  | { type: 'chunk'; text: string }
+  | { type: 'done'; result: ExplainResult; telemetry: StreamTelemetry };
+
+/**
+ * Streaming explain: TX1 (thread + user message) → provider stream OUTSIDE
+ * any transaction (chunks forwarded to `sink` as they arrive) → TX2 persists
+ * the final complete text with the same evidence/citations/highlight as the
+ * non-streaming path. History, identity, and validation-metadata rules are
+ * unchanged. A stream that yields no text throws before anything persists.
+ */
+export async function streamExplainSelection(
+  svc: Services, identity: Identity, args: ExplainArgs,
+  sink: (event: ExplainStreamEvent) => void | Promise<void>,
+): Promise<ExplainResult> {
+  const requestStart = Date.now();
+  const prep = await prepareExplainState(svc, identity, args);
+  const size = estimateExplainInputSize(prep.input);
+  const providerStart = Date.now();
+  let accumulated = '';
+  let modelId = svc.router.adapterId;
+  let provider: string | undefined;
+  let completionTokens: number | undefined;
+  let firstChunkAt = -1;
+  for await (const item of svc.router.streamExplain(prep.input)) {
+    if (item.kind === 'chunk') {
+      if (item.text.length === 0) continue;
+      if (firstChunkAt < 0) firstChunkAt = Date.now();
+      accumulated += item.text;
+      await sink({ type: 'chunk', text: item.text });
+    } else {
+      accumulated = item.text.length > 0 ? item.text : accumulated;
+      modelId = item.modelId;
+      provider = item.provider;
+      completionTokens = item.completionTokens;
+    }
+  }
+  if (accumulated.trim().length === 0) throw new Error('empty provider response');
+  const providerEnd = Date.now();
+  const persisted = await persistAssistantResult(svc, identity, prep, args, accumulated, modelId);
+  const ttftMs = firstChunkAt >= 0 ? firstChunkAt - providerStart : providerEnd - providerStart;
+  const telemetry: StreamTelemetry = {
+    ttftMs,
+    generationMs: Math.max(0, providerEnd - (firstChunkAt >= 0 ? firstChunkAt : providerStart)),
+    totalMs: providerEnd - requestStart,
+    modelId,
+    ...(provider ? { provider } : {}),
+    inputChars: size.inputChars,
+    inputTokenEstimate: size.inputTokenEstimate,
+    outputChars: accumulated.length,
+    outputTokenEstimate: typeof completionTokens === 'number'
+      ? completionTokens
+      : Math.max(1, Math.ceil(accumulated.length / 4)),
+  };
+  await logExplainEvents(svc, identity, prep, args, {
+    modelId: telemetry.modelId,
+    durationMs: providerEnd - providerStart,
+    totalMs: telemetry.totalMs,
+    ttftMs: telemetry.ttftMs,
+    generationMs: telemetry.generationMs,
+    ...(telemetry.provider ? { provider: telemetry.provider } : {}),
+    inputChars: telemetry.inputChars,
+    inputTokenEstimate: telemetry.inputTokenEstimate,
+    outputChars: telemetry.outputChars,
+    outputTokenEstimate: telemetry.outputTokenEstimate,
+  });
+  const result: ExplainResult = {
+    threadId: prep.created.threadId, userMessageId: prep.created.userMessageId,
+    assistantMessageId: persisted.assistantMessageId, text: accumulated,
+    modelId, citationIds: persisted.citationIds,
+  };
+  await sink({ type: 'done', result, telemetry });
+  return result;
 }
