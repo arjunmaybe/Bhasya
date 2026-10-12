@@ -4,6 +4,7 @@ import { getAuthForDb, getIdentityForRequest } from '@bhasya/db';
 import { logEvent } from '@bhasya/db';
 import { HttpError, authorize } from '../../../authorization/resource-resolvers.js';
 import { explainSelection, getServices, ingestSource, reingestSource, resolveAnchor, streamExplainSelection } from './services.js';
+import { createReadingSessionExport, getExportForDownload } from './export-service.js';
 import type { ExplainArgs, ExplainStreamEvent, Identity } from './services.js';
 import { CreateHighlightSchema, CreateThreadSchema, ExplainSchema, IngestSchema, PostMessageSchema, ResolveAnchorSchema } from './schema.js';
 import { withTransaction } from '../../../db/transactions.js';
@@ -403,6 +404,39 @@ export function createApp(): Hono {
       const resolved = await authorize(svc.db, identity, 'document_version', c.req.param('versionId'));
       await logEvent(svc.db, { workspaceId: resolved.workspaceId, userId: identity.userId, eventType: 'document_completed', resourceType: 'document_version', resourceId: c.req.param('versionId') });
       return c.json({ ok: true });
+    } catch (e) { return err(c, e); }
+  });
+
+  // ── Reading-session PDF export (synchronous MVP) ──
+  // Canonical rows are the source of truth; the export appends the caller's
+  // own persisted threads. Bytes travel only through this authorized route —
+  // no public storage URL is ever minted.
+  app.post('/api/documents/:versionId/exports', async (c) => {
+    try {
+      const svc = await getServices();
+      const identity = await getIdentityForRequest(svc.db, c.req.raw.headers, { env: ((c as unknown as { env?: Record<string, unknown> }).env ?? {}) });
+      if (!identity) return c.json({ error: 'unauthenticated' }, 401);
+      const out = await createReadingSessionExport(svc, identity, c.req.param('versionId'));
+      // No event_log write: event_type is CHECK-constrained in frozen 001 and
+      // no existing type describes an export. The exports row is the record.
+      return c.json(out, 201);
+    } catch (e) { return err(c, e); }
+  });
+
+  app.get('/api/exports/:id', async (c) => {
+    try {
+      const svc = await getServices();
+      const identity = await getIdentityForRequest(svc.db, c.req.raw.headers, { env: ((c as unknown as { env?: Record<string, unknown> }).env ?? {}) });
+      if (!identity) return c.json({ error: 'unauthenticated' }, 401);
+      const dl = await getExportForDownload(svc, identity, c.req.param('id'));
+      return new Response(dl.bytes as unknown as BodyInit, {
+        status: 200,
+        headers: {
+          'content-type': 'application/pdf',
+          'content-length': String(dl.byteSize),
+          'content-disposition': `attachment; filename="bhasya-export-${dl.exportId}.pdf"`,
+        },
+      });
     } catch (e) { return err(c, e); }
   });
 

@@ -306,7 +306,7 @@ export function splitStatements(sql: string): string[] {
  * traffic, where nearly every request finds a cold isolate. The fast path below
  * reduces the current-schema case to ~3 round trips with an identical end state.
  * Fresh or partially-migrated databases always take the full replay path.
- * If a future migration (004+) adds tables/columns, extend these lists alongside.
+ * If a future migration (005+) adds tables/columns, extend these lists alongside.
  */
 const MIGRATED_APP_TABLES = [
   'users',
@@ -322,6 +322,7 @@ const MIGRATED_APP_TABLES = [
   'thread_messages',
   'evidence',
   'citations',
+  'exports',
   'embeddings',
   'event_log',
   'auth_sessions',
@@ -382,9 +383,10 @@ export async function migrate(db: DbClient): Promise<void> {
 
   // Ordered migrations. 001 is FROZEN; 002 adds the legacy custom session
   // table (kept for existing databases, NOT used for auth); 003 adds the
-  // additive app-user link to the Better Auth user. None touch the canonical
+  // additive app-user link to the Better Auth user; 004 adds the additive
+  // reading-session PDF exports table. None touch the canonical
   // document model.
-  const files = ['001_initial_schema.sql', '002_auth_sessions.sql', '003_app_users_external_id.sql'];
+  const files = ['001_initial_schema.sql', '002_auth_sessions.sql', '003_app_users_external_id.sql', '004_exports.sql'];
   let loadedAny = false;
   for (const name of files) {
     const sql = await readMigrationFile(name);
@@ -405,11 +407,12 @@ export async function migrate(db: DbClient): Promise<void> {
     // Previously this branch ran only the legacy auth_sessions DDL — which
     // REFERENCES users(id) — before users existed, and returned before
     // creating the Better Auth schema (relation "users" does not exist).
-    const { EMBEDDED_001_INITIAL_SCHEMA, EMBEDDED_003_APP_USERS_LINK } = await import('./embeddedMigrations.js');
+    const { EMBEDDED_001_INITIAL_SCHEMA, EMBEDDED_003_APP_USERS_LINK, EMBEDDED_004_EXPORTS } = await import('./embeddedMigrations.js');
     await runAllWithVectorFallback(EMBEDDED_001_INITIAL_SCHEMA);
     const { ensureAuthTables } = await import('./auth.js');
     await ensureAuthTables(db);
     await runAll(EMBEDDED_003_APP_USERS_LINK);
+    await runAll(EMBEDDED_004_EXPORTS);
     // Better Auth owns its own tables (user/session/account/verification).
     const { ensureBetterAuthSchema } = await import('./betterAuth.js');
     await ensureBetterAuthSchema(db);

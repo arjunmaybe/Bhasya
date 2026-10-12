@@ -12,8 +12,47 @@ function decodeEntities(s: string): string {
     .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ');
 }
 
+/**
+ * Inline elements contribute no text of their own: the browser concatenates
+ * their content with surrounding text, so removing them must not insert a
+ * space (`word1<b>word2</b>` renders as `word1word2`, and `</b>,` renders
+ * with no gap before the comma). Inserting a space here created phantom
+ * spaces in canonical text that made browser-visible selections unresolvable.
+ */
+const INLINE_TAGS = new Set([
+  'a', 'abbr', 'acronym', 'b', 'bdi', 'bdo', 'big', 'cite', 'code',
+  'del', 'dfn', 'em', 'font', 'i', 'ins', 'kbd', 'mark', 'q', 's',
+  'samp', 'small', 'span', 'strike', 'strong', 'sub', 'sup', 'tt',
+  'u', 'var',
+]);
+
+/**
+ * Boundary elements separate content in rendered text (block breaks and
+ * <br> surface as whitespace in selections), so they contribute one
+ * separator. Unknown elements are inline by default in HTML; void/replaced
+ * elements without text (img, input, …) likewise contribute nothing — both
+ * default to no separator to match the browser.
+ */
+const SEPARATOR_TAGS = new Set([
+  'address', 'article', 'aside', 'blockquote', 'br', 'details', 'div',
+  'dl', 'dt', 'dd', 'fieldset', 'figcaption', 'figure', 'footer', 'form',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hgroup', 'hr', 'li',
+  'main', 'nav', 'ol', 'p', 'pre', 'section', 'summary', 'table',
+  'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul',
+]);
+
 function stripTags(html: string): string {
-  return decodeEntities(html.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+  const noComments = html
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<![^>]*>/g, '')
+    .replace(/<\?[^>]*\?>/g, '');
+  const deTagged = noComments.replace(/<\/?([A-Za-z][A-Za-z0-9]*)[^>]*>/g, (m, tag) => {
+    const t = String(tag).toLowerCase();
+    if (INLINE_TAGS.has(t)) return '';
+    if (SEPARATOR_TAGS.has(t)) return ' ';
+    return '';
+  });
+  return decodeEntities(deTagged).replace(/\s+/g, ' ').trim();
 }
 
 function extractBlocks(html: string): Array<{ tag: string; text: string }> {

@@ -1,10 +1,7 @@
-import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { Client, Pool } from 'pg';
 import { Kysely, PostgresDialect, sql } from 'kysely';
+import { bootEmbeddedPostgres } from './embedded-pg.js';
 
 /**
  * STEP 3 local proof: does the DB-client lifecycle (not credentials, not the
@@ -26,56 +23,35 @@ import { Kysely, PostgresDialect, sql } from 'kysely';
  * minimal pool facade, including transaction commit/rollback.
  */
 
-const pgUrlFor = (port: number) =>
-  `postgres://bhasya:bhasya@127.0.0.1:${port}/postgres`;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Allocate an ephemeral free TCP port via the OS (bind :0, read back, close).
- * `embedded-postgres` passes `-p <port>` through to `postgres` and only waits
- * for "ready to accept connections", so it cannot discover a port chosen via
- * `-p 0` itself — the caller must allocate first and build PG_URL from it.
- * Uses only `node:net` (no new dependency). Single allocation, no retries:
- * a startup bind failure surfaces instead of being hidden.
+ * Shared cluster: one initdb+start per file (was: one per test). Boot is
+ * serialized with hyperdrive-path.test.ts via tests/embedded-pg.ts
+ * (cross-process lock around initdb+start only) to avoid parallel-suite
+ * contention. Each file keeps its own isolated cluster. Assertions unchanged.
  */
-async function getFreePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => resolve());
-  });
-  const address = server.address();
-  const port = typeof address === 'object' && address !== null ? address.port : 0;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  if (!port) throw new Error('failed to allocate a free TCP port for embedded postgres');
-  return port;
-}
+let sharedUrl!: string;
+let sharedStop!: () => Promise<void>;
 
-async function bootPg(prefix: string): Promise<{
-  pg: { initialise(): Promise<void>; start(): Promise<void>; stop(): Promise<void> };
-  pgDir: string;
-  port: number;
-  url: string;
-}> {
-  const pgDir = mkdtempSync(join(tmpdir(), prefix));
-  const { default: EmbeddedPostgres } = (await import('embedded-postgres')) as any;
-  const port = await getFreePort();
-  const pg = new EmbeddedPostgres({ databaseDir: pgDir, user: 'bhasya', password: 'bhasya', port, persistent: false });
-  await pg.initialise();
-  await pg.start();
-  return { pg, pgDir, port, url: pgUrlFor(port) };
-}
+beforeAll(async () => {
+  const boot = await bootEmbeddedPostgres('hdlifecycle');
+  sharedUrl = boot.pgUrl;
+  sharedStop = boot.stop;
+}, 60000);
 
-async function stopPg(pg: { stop(): Promise<void> }, pgDir: string): Promise<void> {
-  try { await pg.stop(); } catch { /* ignore */ }
-  try { rmSync(pgDir, { recursive: true, force: true }); } catch { /* ignore */ }
-}
+afterAll(async () => {
+  await sharedStop?.();
+}, 60000);
 
 async function backendCount(pgUrl: string): Promise<number> {
   const admin = new Client({ connectionString: pgUrl });
   await admin.connect();
   try {
+    // Scope to the current database (see hyperdrive-path.test.ts): per-file
+    // databases on the shared server stay isolated. Threshold unchanged.
     const r = await admin.query(
-      `SELECT count(*) AS n FROM pg_stat_activity WHERE usename = 'bhasya' AND datname = 'postgres'`,
+      `SELECT count(*) AS n FROM pg_stat_activity WHERE usename = 'bhasya' AND datname = current_database()`,
     );
     return Number((r.rows[0] as any).n);
   } finally {
@@ -83,11 +59,9 @@ async function backendCount(pgUrl: string): Promise<number> {
   }
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 describe('hyperdrive lifecycle proof (local TCP postgres)', () => {
   it('cached Pool holds backends between requests; per-request Client holds none', async () => {
-    const { pg, pgDir, url: pgUrl } = await bootPg('bhasya-hd-');
+    const pgUrl = sharedUrl;
     let pool: Pool | null = null;
     try {
 
@@ -117,13 +91,12 @@ describe('hyperdrive lifecycle proof (local TCP postgres)', () => {
       expect(pool.totalCount).toBeGreaterThan(0);
     } finally {
       try { await pool?.end(); } catch { /* ignore */ }
-      await stopPg(pg, pgDir);
     }
   });
 
   it('Kysely works over a single client via a minimal pool facade, with tx commit/rollback', async () => {
-    const { pg, pgDir, url: pgUrl } = await bootPg('bhasya-hd-ky-');
-    try {
+    const pgUrl = sharedUrl;
+    {
       const client = new Client({ connectionString: pgUrl });
       await client.connect();
       try {
@@ -148,11 +121,10 @@ describe('hyperdrive lifecycle proof (local TCP postgres)', () => {
         const rows = await sql`SELECT v FROM hd_probe ORDER BY v`.execute(kysely);
         expect(rows.rows.map((r: any) => r.v)).toEqual(['a']);
         await kysely.destroy();
+        await client.query(`DROP TABLE hd_probe`);
       } finally {
         await client.end();
       }
-    } finally {
-      await stopPg(pg, pgDir);
     }
   });
 });
