@@ -248,12 +248,15 @@ export function ReaderClient(props: {
    * open thread changes so heights never leak across threads.
    */
   const [threadHeight, setThreadHeight] = useState<number | null>(null);
-  const THREAD_MIN_H = 240;
+  // Absolute floor for the manual height. The live-layout minimum is measured
+  // per open thread by getThreadMinHeight() below, since fixed chrome height
+  // varies with excerpt length and breakpoint. Live Chrome measurement showed
+  // 240px clipped the handle ~68px out of reach; 320px fits 1-2 line excerpts
+  // on desktop and narrow breakpoints with a small guard band.
+  const THREAD_MIN_H = 320;
   const THREAD_STEP = 24;
-  const threadMaxHeight = () =>
-    typeof window === 'undefined' ? 720 : Math.max(THREAD_MIN_H + 48, window.innerHeight - 80);
-  const clampThreadHeight = (h: number) =>
-    Math.min(threadMaxHeight(), Math.max(THREAD_MIN_H, Math.round(h)));
+  // threadMaxHeight / clampThreadHeight are defined below (after threadCardRef)
+  // so the minimum can be measured from the live card layout.
   const [messages, setMessages] = useState<Msg[]>([]);
   const [cites, setCites] = useState<Cite[]>([]);
   const [evidence, setEvidence] = useState<EvidenceDto[]>([]);
@@ -295,6 +298,84 @@ export function ReaderClient(props: {
   const focusAfterSendRef = useRef(false);
   const citeFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  /**
+   * Measured minimum card height that keeps the fixed chrome reachable.
+   * .thread-card is overflow:hidden + flex column with non-shrinking
+   * .thread-head / .thread-foot / .thread-resize and a shrinking
+   * .thread-scroll (min-height:0). When the explicit height is smaller than
+   * the fixed chrome, the in-flow bottom handle is pushed outside the card
+   * and clipped (overflow:hidden), so it can no longer be dragged.
+   *
+   * Live Chrome 1280x900, 280-char excerpt (representative thread):
+   * head 145px + foot 93px + handle 22px + handle margin-top 12px +
+   * card border 2px + card padding-top 16px (bottom padding cancelled by the
+   * handle's -16px bottom margin) + scroll margins 8px + scroll padding 16px
+   * (collapsed content) = 314px. At height=240px the handle sits ~73px below
+   * the card bottom (visible height 0, elementFromPoint misses the handle);
+   * full visibility starts at 314px (1px-step sweep). Short/no excerpt,
+   * expanded, and narrow/mobile layouts measure differently (e.g. 239-390px),
+   * so the minimum is measured per layout instead of a blind constant.
+   * THREAD_MIN_H stays as the absolute floor when nothing is measurable.
+   */
+  const getThreadMinHeight = useCallback(() => {
+    if (typeof window === 'undefined') return THREAD_MIN_H;
+    const card = threadCardRef.current;
+    if (!card) return THREAD_MIN_H;
+    const head = card.querySelector('.thread-head') as HTMLElement | null;
+    const foot = card.querySelector('.thread-foot') as HTMLElement | null;
+    const handle = card.querySelector('.thread-resize') as HTMLElement | null;
+    const scroll = card.querySelector('.thread-scroll') as HTMLElement | null;
+    if (!head || !foot || !handle) return THREAD_MIN_H;
+    try {
+      const cs = getComputedStyle(card);
+      const hs = getComputedStyle(handle);
+      const padTop = parseFloat(cs.paddingTop) || 0;
+      const padBottom = parseFloat(cs.paddingBottom) || 0;
+      const borderTop = parseFloat(cs.borderTopWidth) || 0;
+      const borderBottom = parseFloat(cs.borderBottomWidth) || 0;
+      const handleMarginTop = parseFloat(hs.marginTop) || 0;
+      const handleMarginBottom = parseFloat(hs.marginBottom) || 0;
+      // The handle's negative bottom margin cancels the card's bottom padding.
+      const effectiveBottom = Math.max(0, padBottom + handleMarginBottom);
+      let scrollChrome = 0;
+      if (scroll) {
+        const ss = getComputedStyle(scroll);
+        scrollChrome =
+          (parseFloat(ss.marginTop) || 0) +
+          (parseFloat(ss.marginBottom) || 0) +
+          (parseFloat(ss.paddingTop) || 0) +
+          (parseFloat(ss.paddingBottom) || 0) +
+          (parseFloat(ss.borderTopWidth) || 0) +
+          (parseFloat(ss.borderBottomWidth) || 0);
+      }
+      const measured = Math.ceil(
+        borderTop +
+          borderBottom +
+          padTop +
+          effectiveBottom +
+          head.offsetHeight +
+          foot.offsetHeight +
+          handle.offsetHeight +
+          handleMarginTop +
+          scrollChrome,
+      );
+      return Math.max(THREAD_MIN_H, measured);
+    } catch {
+      return THREAD_MIN_H;
+    }
+  }, [THREAD_MIN_H]);
+  const threadMaxHeight = useCallback(
+    () =>
+      typeof window === 'undefined'
+        ? 720
+        : Math.max(getThreadMinHeight() + 48, window.innerHeight - 80),
+    [getThreadMinHeight],
+  );
+  const clampThreadHeight = useCallback(
+    (h: number) => Math.min(threadMaxHeight(), Math.max(getThreadMinHeight(), Math.round(h))),
+    [threadMaxHeight, getThreadMinHeight],
+  );
+
   useEffect(() => () => {
     if (citeFlashTimer.current) clearTimeout(citeFlashTimer.current);
   }, []);
@@ -306,6 +387,20 @@ export function ReaderClient(props: {
   useEffect(() => {
     setThreadHeight(null);
   }, [openThreadId]);
+  // Viewport change: reclamp a retained manual height so the resize handle
+  // stays reachable after the window shrinks. Null stays null (automatic
+  // height); non-null is clamped with the current min/max policy.
+  useEffect(() => {
+    const onViewportResize = () => {
+      setThreadHeight((prev) => {
+        if (prev == null) return prev;
+        const next = clampThreadHeight(prev);
+        return next === prev ? prev : next;
+      });
+    };
+    window.addEventListener('resize', onViewportResize);
+    return () => window.removeEventListener('resize', onViewportResize);
+  }, [clampThreadHeight]);
   useEffect(() => () => {
     laneCancel(explainLane.current);
     laneCancel(followupLane.current);
@@ -404,13 +499,13 @@ export function ReaderClient(props: {
     let next: number | null = null;
     if (e.key === 'ArrowDown') next = base + THREAD_STEP;
     else if (e.key === 'ArrowUp') next = base - THREAD_STEP;
-    else if (e.key === 'Home') next = THREAD_MIN_H;
+    else if (e.key === 'Home') next = getThreadMinHeight();
     else if (e.key === 'End') next = threadMaxHeight();
     else return;
     e.preventDefault();
     e.stopPropagation();
     setThreadHeight(clampThreadHeight(next));
-  }, [threadHeight, clampThreadHeight]);
+  }, [threadHeight, clampThreadHeight, getThreadMinHeight, threadMaxHeight]);
 
   // Compact reopen: clicking the compact thread surface (body/content)
   // re-expands the SAME thread. Nothing is refetched, cleared, or toggled:
@@ -1168,7 +1263,7 @@ export function ReaderClient(props: {
               role="slider"
               tabIndex={0}
               aria-label="Resize passage thread height"
-              aria-valuemin={THREAD_MIN_H}
+              aria-valuemin={getThreadMinHeight()}
               aria-valuemax={threadMaxHeight()}
               aria-valuenow={threadHeight ?? undefined}
               aria-valuetext={threadHeight != null ? `${threadHeight} pixels tall` : 'Automatic height'}

@@ -1,6 +1,12 @@
 :root { color-scheme: light; }
 * { box-sizing: border-box; }
-html, body { overflow-x: hidden; }
+/* Horizontal overflow is clipped WITHOUT creating a scroll container.
+   overflow-x: hidden would compute body overflow-y to auto, making <body>
+   a scroll container that breaks position: sticky on .side (the passage
+   thread sidebar would scroll away with the page instead of staying
+   pinned, taking the resize handle out of view). overflow-x: clip keeps
+   identical visual clipping while sticky keeps working. */
+html, body { overflow-x: clip; }
 body { margin: 0; font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a; background: #faf9f6; }
 .topbar { display: flex; align-items: baseline; gap: 12px; padding: 12px 20px; border-bottom: 1px solid #e3ded2; background: #fff; }
 .brand { font-size: 20px; font-weight: 700; color: #1a1a1a; text-decoration: none; letter-spacing: 0.2px; }
