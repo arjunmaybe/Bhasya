@@ -1,11 +1,8 @@
-import { describe, expect, it, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { describe, expect, it, afterEach, beforeAll, afterAll } from 'vitest';
 import { openDb, getAuthForDb, ensureBetterAuthSchema, type DbClient } from '@bhasya/db';
 import { withTransaction } from '../db/transactions.js';
 import { getServices, setServices } from '../apps/api/src/services.js';
+import { bootEmbeddedPostgres } from './embedded-pg.js';
 
 /**
  * Hyperdrive + direct transport path (both request-scoped pg.Client, nothing retained):
@@ -19,53 +16,40 @@ import { getServices, setServices } from '../apps/api/src/services.js';
  * no Supabase, no secrets.
  */
 
-const pgUrlFor = (port: number) =>
-  `postgres://bhasya:bhasya@127.0.0.1:${port}/postgres`;
 const DEAD_URL = `postgres://bhasya:bhasya@127.0.0.1:1/nodead`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Allocate an ephemeral free TCP port via the OS (bind :0, read back, close).
- * Same mechanism as tests/hyperdrive-lifecycle.test.ts. `embedded-postgres`
- * cannot discover a `-p 0` port itself, so the caller allocates first and
- * builds PG_URL from the actual port. Uses only `node:net`; single
- * allocation, no retries.
+ * Shared cluster: one initdb+start per file (was: one per test, ~15s each,
+ * ~73s per file alone). Boot itself is serialized across the two
+ * embedded-Postgres files via tests/embedded-pg.ts (cross-process lock around
+ * initdb+start only): concurrent initdb across parallel test files pushed a
+ * single boot past the 60s per-test budget in the full suite. Each file still
+ * gets its own isolated cluster (own dir/port/URL/tables), so isolation is
+ * preserved. Client lifecycle is unchanged: every openDb/query still uses a
+ * fresh pg.Client, no cached Pool.
  */
-async function getFreePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => resolve());
-  });
-  const address = server.address();
-  const port = typeof address === 'object' && address !== null ? address.port : 0;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  if (!port) throw new Error('failed to allocate a free TCP port for embedded postgres');
-  return port;
-}
+let sharedPgUrl!: string;
+let sharedStop!: () => Promise<void>;
 
-async function bootPg() {
-  const pgDir = mkdtempSync(join(tmpdir(), 'bhasya-hdpath-'));
-  const { default: EmbeddedPostgres } = (await import('embedded-postgres')) as any;
-  const port = await getFreePort();
-  const pgUrl = pgUrlFor(port);
-  const pg = new EmbeddedPostgres({ databaseDir: pgDir, user: 'bhasya', password: 'bhasya', port, persistent: false });
-  await pg.initialise();
-  await pg.start();
-  return {
-    pg, pgDir, pgUrl,
-    stop: async () => {
-      try { await pg.stop(); } catch { /* ignore */ }
-      try { rmSync(pgDir, { recursive: true, force: true }); } catch { /* ignore */ }
-    },
-  };
-}
+beforeAll(async () => {
+  const boot = await bootEmbeddedPostgres('hdpath');
+  sharedPgUrl = boot.pgUrl;
+  sharedStop = boot.stop;
+}, 60000);
+
+afterAll(async () => {
+  await sharedStop?.();
+}, 60000);
 
 async function backendCount(pgUrl: string): Promise<number> {
   const db = await openDb({ databaseUrl: pgUrl });
   try {
+    // Scope to the current database: when the full suite reuses one shared
+    // server with per-file databases (hdpath/hdlifecycle), neither file
+    // observes the other's backends. Threshold unchanged (<=2).
     const r = await db.query(
-      `SELECT count(*) AS n FROM pg_stat_activity WHERE usename = 'bhasya' AND datname = 'postgres'`,
+      `SELECT count(*) AS n FROM pg_stat_activity WHERE usename = 'bhasya' AND datname = current_database()`,
     );
     return Number((r.rows[0] as any).n);
   } finally {
@@ -77,8 +61,8 @@ afterEach(() => { setServices(null); });
 
 describe('hyperdrive transport path', () => {
   it('direct DATABASE_URL is stateless: fresh Client per operation, no cached Pool', async () => {
-    const { pgUrl, stop } = await bootPg();
-    try {
+    const pgUrl = sharedPgUrl;
+    {
       const db = await openDb({ databaseUrl: pgUrl });
       try {
         expect((db as { pool?: unknown }).pool).toBeFalsy();
@@ -105,14 +89,12 @@ describe('hyperdrive transport path', () => {
       await sleep(100);
       // Nothing retained between "requests" beyond the counting connection itself.
       expect(await backendCount(pgUrl)).toBeLessThanOrEqual(2);
-    } finally {
-      await stop();
     }
   });
 
   it('hyperdrive DbClient is stateless: queries, tx commit/rollback, no retained backends', async () => {
-    const { pgUrl, stop } = await bootPg();
-    try {
+    const pgUrl = sharedPgUrl;
+    {
       const db = await openDb({ databaseUrl: pgUrl, hyperdrive: true });
       try {
         expect((db as { pool?: unknown }).pool).toBeFalsy();
@@ -137,14 +119,12 @@ describe('hyperdrive transport path', () => {
       await sleep(100);
       // Nothing retained between "requests" beyond the counting connection itself.
       expect(await backendCount(pgUrl)).toBeLessThanOrEqual(2);
-    } finally {
-      await stop();
     }
   });
 
   it('Better Auth operates through the hyperdrive DbClient', async () => {
-    const { pgUrl, stop } = await bootPg();
-    try {
+    const pgUrl = sharedPgUrl;
+    {
       const db = await openDb({ databaseUrl: pgUrl, hyperdrive: true });
       try {
         await db.query(`CREATE TABLE IF NOT EXISTS hd_noop (id SERIAL PRIMARY KEY)`);
@@ -156,14 +136,12 @@ describe('hyperdrive transport path', () => {
       } finally {
         await db.close?.();
       }
-    } finally {
-      await stop();
     }
   });
 
   it('getServices prefers HYPERDRIVE and falls back to DATABASE_URL', async () => {
-    const { pgUrl, stop } = await bootPg();
-    try {
+    const pgUrl = sharedPgUrl;
+    {
       // HYPERDRIVE valid + DATABASE_URL dead → succeeds via Hyperdrive.
       setServices(null);
       const viaHd = await getServices({
@@ -190,9 +168,6 @@ describe('hyperdrive transport path', () => {
         env: { DATABASE_URL: pgUrl, HYPERDRIVE: { connectionString: DEAD_URL } },
       })).rejects.toThrow(/ECONNREFUSED|connect/);
       setServices(null);
-    } finally {
-      setServices(null);
-      await stop();
     }
   });
 

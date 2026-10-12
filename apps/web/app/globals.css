@@ -99,6 +99,19 @@ mark.cite-flash { background: #ccfbf1; outline: 2px solid #0f766e; border-radius
 .thread-context { margin-top: 8px; }
 .thread-context-btn { font-size: 12px; }
 .thread-actions { display: flex; gap: 8px; }
+/* Manual thread resize: a bottom-edge drag strip in normal flow, so the
+   highlights list below shifts down as the card grows (no overlay, no
+   fixed/absolute positioning, no transforms). touch-action keeps the gesture
+   from fighting page scroll on mobile; selection elsewhere is untouched. */
+.thread-resize { display: flex; align-items: center; justify-content: center; flex: 0 0 auto; height: 22px; margin: 12px -16px -16px; padding: 6px 0; border-top: 1px solid #ece7d9; cursor: ns-resize; touch-action: none; user-select: none; -webkit-user-select: none; }
+.thread-resize:focus-visible { outline: 2px solid #0f766e; outline-offset: -2px; }
+.thread-resize-grip { width: 56px; height: 5px; border-radius: 3px; background: #c9c4b4; }
+.thread-resize:hover .thread-resize-grip { background: #6f6a5e; }
+@media (max-width: 900px) { .thread-resize { height: 30px; } }
+/* PDF export row: secondary action at the top of the side panel. Restrained
+   ghost button; never competes with reading or the active thread. */
+.export-row { display: flex; align-items: center; gap: 8px; }
+.export-row .error { margin: 0; }
 .cite-btn { display: inline-block; margin: 4px 8px 0 0; font-size: 12px; line-height: 1.4; border: 1px solid #999; background: #fff; border-radius: 6px; padding: 4px 10px; }
 .cite-btn:hover { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
 .cite-block { border: 1px solid #0f766e; border-left: 4px solid #0f766e; background: #f0fdfa; border-radius: 6px; padding: 8px 12px; margin: 12px 0; }
@@ -113,6 +126,22 @@ mark.cite-flash { background: #ccfbf1; outline: 2px solid #0f766e; border-radius
 .hl-list button.hl-item { display: block; width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid #eee; padding: 8px 4px; font-size: 13px; line-height: 1.5; border-radius: 4px; }
 .hl-list button.hl-item:hover { background: #f5f3ec; }
 .hl-list button.hl-item.active { background: #fffbeb; box-shadow: inset 3px 0 0 #1a1a1a; }
+/* Manual thread resize stays in normal flow. The default sidebar is a
+   viewport-constrained box (.side max-height + overflow hidden) whose flex
+   shrink would squeeze .hl-list to zero and clip the card bottom (hiding
+   Highlights, then the resize handle) as the thread grows. While a manual
+   height is set, the sidebar grows in normal page flow instead: the thread
+   occupies real layout space, Highlights below shifts down, and the
+   bottom-edge handle (last in-flow child of the card) is never clipped.
+   No absolute/fixed positioning, no transforms, no JS coordinates. */
+.side[data-thread-resized="true"] { max-height: none; overflow: visible; }
+.side[data-thread-resized="true"] .thread-card,
+.thread-card[data-resized="true"] { max-height: none; }
+.side[data-thread-resized="true"] .hl-list { flex: 0 0 auto; }
+@media (max-width: 900px) {
+  .side[data-thread-resized="true"] .thread-card,
+  .thread-card[data-resized="true"] { max-height: none; }
+}
 .followup { display: flex; gap: 8px; margin-top: 4px; }
 .followup input { flex: 1; min-width: 0; padding: 8px 12px; font-size: 13px; border: 1px solid #c9c4b4; border-radius: 6px; }
 .meta { font-size: 12px; line-height: 1.5; color: #6f6a5e; font-family: system-ui, sans-serif; }

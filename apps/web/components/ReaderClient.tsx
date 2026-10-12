@@ -1,7 +1,16 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { browserApiBase, browserReq } from '@/lib/api';
+import {
+  createStreamLane,
+  laneBegin,
+  laneCancel,
+  laneIsCurrent,
+  laneSettle,
+  type StreamLane,
+} from '@/lib/stream-lane';
 import {
   EXPLAIN_FALLBACK_SIZE,
   clampExplainPosition,
@@ -232,22 +241,45 @@ export function ReaderClient(props: {
    * as compact mode (which preserves the thread).
    */
   const [panelMode, setPanelMode] = useState<'compact' | 'expanded'>('compact');
+  /**
+   * Manual thread height (local UI state only, never persisted). Dragging the
+   * bottom-edge handle sets an explicit card height in normal flow, so later
+   * sidebar content (highlights list) shifts down with it. Reset whenever the
+   * open thread changes so heights never leak across threads.
+   */
+  const [threadHeight, setThreadHeight] = useState<number | null>(null);
+  const THREAD_MIN_H = 240;
+  const THREAD_STEP = 24;
+  const threadMaxHeight = () =>
+    typeof window === 'undefined' ? 720 : Math.max(THREAD_MIN_H + 48, window.innerHeight - 80);
+  const clampThreadHeight = (h: number) =>
+    Math.min(threadMaxHeight(), Math.max(THREAD_MIN_H, Math.round(h)));
   const [messages, setMessages] = useState<Msg[]>([]);
   const [cites, setCites] = useState<Cite[]>([]);
   const [evidence, setEvidence] = useState<EvidenceDto[]>([]);
   const [threadSel, setThreadSel] = useState('');
   const [followup, setFollowup] = useState('');
+  // PDF export is a secondary action: request generation server-side, then
+  // download the private artifact. No document work happens in the browser.
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState('');
   // Progressive assistant text while a stream is open. Rendered as-is (no
   // typing animation); cleared the moment the final message lands.
   const [streamText, setStreamText] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [citeFlash, setCiteFlash] = useState<{ passageId: string; start: number; end: number } | null>(null);
-  const streamAbortRef = useRef<AbortController | null>(null);
+  // Independent cancellation lanes: Explain and follow-up own separate
+  // controllers, so neither flow can cancel or invalidate the other.
+  // `cancelled` is set only at intentional sites (unmount, thread close).
+  const explainLane = useRef<StreamLane>(createStreamLane());
+  const followupLane = useRef<StreamLane>(createStreamLane());
   const openThreadRef = useRef<string | null>(null);
   const docRef = useRef<HTMLDivElement>(null);
   // Dedicated ref to the thread conversation scroll container. Follow-up
   // navigation scrolls THIS element only, never the whole page.
   const threadScrollRef = useRef<HTMLDivElement>(null);
+  const threadCardRef = useRef<HTMLDivElement>(null);
+  const resizeDragRef = useRef<{ startY: number; startH: number } | null>(null);
   const followupInputRef = useRef<HTMLInputElement>(null);
   // Exact newly created user-message id awaiting a one-shot reveal. Set from
   // the follow-up POST response, consumed once that node has rendered.
@@ -270,8 +302,13 @@ export function ReaderClient(props: {
   useEffect(() => {
     openThreadRef.current = openThreadId;
   }, [openThreadId]);
+  // A new thread starts at automatic height; manual sizes never leak across threads.
+  useEffect(() => {
+    setThreadHeight(null);
+  }, [openThreadId]);
   useEffect(() => () => {
-    streamAbortRef.current?.abort();
+    laneCancel(explainLane.current);
+    laneCancel(followupLane.current);
   }, []);
 
   // Edge-trimmed preview of the in-flight assistant text. Same normalization
@@ -335,6 +372,45 @@ export function ReaderClient(props: {
     if (typeof window !== 'undefined' && (window.getSelection()?.toString().trim() ?? '') !== '') return;
     setPanelMode('compact');
   }, [openThreadId]);
+
+  // Manual thread-card resize (bottom-edge drag handle). Pointer capture
+  // keeps the gesture on the handle so text selection and scrolling
+  // elsewhere are untouched; clicks on the handle never reach the card's
+  // compact-expand toggle. Keyboard arrows/Home/End resize equivalently.
+  const onResizePointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const card = threadCardRef.current;
+    resizeDragRef.current = {
+      startY: e.clientY,
+      startH: threadHeight ?? card?.offsetHeight ?? THREAD_MIN_H,
+    };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* noop: mouse fallback still works */ }
+  }, [threadHeight]);
+  const onResizePointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = resizeDragRef.current;
+    if (!drag) return;
+    e.stopPropagation();
+    const next = clampThreadHeight(drag.startH + (e.clientY - drag.startY));
+    setThreadHeight((prev) => (prev === next ? prev : next));
+  }, [clampThreadHeight]);
+  const endResizeDrag = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    resizeDragRef.current = null;
+  }, []);
+  const onResizeKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const card = threadCardRef.current;
+    const base = threadHeight ?? card?.offsetHeight ?? THREAD_MIN_H;
+    let next: number | null = null;
+    if (e.key === 'ArrowDown') next = base + THREAD_STEP;
+    else if (e.key === 'ArrowUp') next = base - THREAD_STEP;
+    else if (e.key === 'Home') next = THREAD_MIN_H;
+    else if (e.key === 'End') next = threadMaxHeight();
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+    setThreadHeight(clampThreadHeight(next));
+  }, [threadHeight, clampThreadHeight]);
 
   // Compact reopen: clicking the compact thread surface (body/content)
   // re-expands the SAME thread. Nothing is refetched, cleared, or toggled:
@@ -457,10 +533,10 @@ export function ReaderClient(props: {
   }, []);
 
   function clearThreadState() {
-    // An in-flight stream belongs to the closing thread: abort it so a late
-    // completion can never repopulate cleared state.
-    streamAbortRef.current?.abort();
-    streamAbortRef.current = null;
+    // An in-flight stream belongs to the closing thread: abort both lanes so
+    // a late completion can never repopulate cleared state.
+    laneCancel(explainLane.current);
+    laneCancel(followupLane.current);
     pendingExplainRef.current = null;
     setStreamText('');
     setStreaming(false);
@@ -472,6 +548,30 @@ export function ReaderClient(props: {
     setEvidence([]);
     setThreadSel('');
     setFollowup('');
+  }
+
+  // Reading-session PDF export: the browser only requests generation and
+  // downloads the private artifact. Generation, storage, and authorization
+  // all stay server-side; the session cookie authenticates the download.
+  async function exportPdf() {
+    if (exporting) return;
+    setExporting(true);
+    setExportError('');
+    try {
+      const out = (await browserReq(`/api/documents/${versionId}/exports`, {
+        method: 'POST',
+      })) as { exportId: string };
+      const a = document.createElement('a');
+      a.href = `${browserApiBase()}/api/exports/${out.exportId}`;
+      a.setAttribute('download', '');
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : 'export failed');
+    } finally {
+      setExporting(false);
+    }
   }
 
   // Closing DESTROYS thread state — distinct from compact mode, which
@@ -563,6 +663,13 @@ export function ReaderClient(props: {
         .then((r: any) => setHighlights(r.highlights))
         .catch(() => {});
     };
+    // This lane belongs to Explain only: follow-up traffic can neither
+    // cancel it nor be cancelled by it. The controller binding is declared
+    // before the first await so an anchor-resolution failure reaches the
+    // normal error/fallback path instead of a TDZ reference error.
+    const lane = explainLane.current;
+    let ctrl: AbortController | null = null;
+    const isCurrent = () => laneIsCurrent(lane, ctrl);
     try {
       const anchor = (await browserReq('/api/anchors/resolve', {
         method: 'POST',
@@ -580,9 +687,7 @@ export function ReaderClient(props: {
       if (explainPassageId) pendingExplainRef.current = explainPassageId;
       // Prefer the streaming path so first useful text appears as generated.
       // Falls back to the complete/wait path when streaming is unavailable.
-      const ctrl = new AbortController();
-      streamAbortRef.current = ctrl;
-      const isCurrent = () => streamAbortRef.current === ctrl && !ctrl.signal.aborted;
+      ctrl = laneBegin(lane);
       let receivedAny = false;
       try {
         setStreaming(true);
@@ -603,16 +708,24 @@ export function ReaderClient(props: {
           pendingExplainRef.current = null;
           return;
         }
-        streamAbortRef.current = null;
+        laneSettle(lane, ctrl);
         setStreamText('');
         setStreaming(false);
         await finishExplain(anchor, String(done.threadId));
       } catch (streamErr) {
+        // Intentional cancellation (unmount/close) stays silent. A
+        // superseded completion is ignored without fabricating output. Any
+        // other failure surfaces through the fallback/error path below — an
+        // AbortError is never blindly treated as user cancellation.
+        if (lane.cancelled) {
+          pendingExplainRef.current = null;
+          return;
+        }
         if (!isCurrent()) {
           pendingExplainRef.current = null;
           return;
         }
-        streamAbortRef.current = null;
+        laneSettle(lane, ctrl);
         setStreamText('');
         setStreaming(false);
         if (receivedAny) throw streamErr;
@@ -696,9 +809,12 @@ export function ReaderClient(props: {
       // Prefer streaming: the assistant answer accumulates below the exact
       // question as it is generated. Falls back to the complete/wait path
       // when streaming is unavailable before any chunk arrives.
-      const ctrl = new AbortController();
-      streamAbortRef.current = ctrl;
-      const isCurrent = () => streamAbortRef.current === ctrl && !ctrl.signal.aborted;
+      // Own lane (never Explain's): concurrent flows cannot cancel each
+      // other, and the binding exists before any await (TDZ-safe).
+      const lane = followupLane.current;
+      let ctrl: AbortController | null = null;
+      const isCurrent = () => laneIsCurrent(lane, ctrl);
+      ctrl = laneBegin(lane);
       let receivedAny = false;
       try {
         setStreaming(true);
@@ -716,13 +832,16 @@ export function ReaderClient(props: {
           setStreamText((prev) => prev + t);
         })) as { userMessageId: string };
         if (!isCurrent()) return;
-        streamAbortRef.current = null;
+        laneSettle(lane, ctrl);
         setStreamText('');
         setStreaming(false);
         await finishFollowup(String(done.userMessageId));
       } catch (streamErr) {
+        // Intentional cancellation stays silent; superseded completions are
+        // ignored; any other failure uses the fallback/error path below.
+        if (lane.cancelled) return;
         if (!isCurrent()) return;
-        streamAbortRef.current = null;
+        laneSettle(lane, ctrl);
         setStreamText('');
         setStreaming(false);
         if (receivedAny) {
@@ -937,17 +1056,38 @@ export function ReaderClient(props: {
         </div>
       </article>
 
-      <aside className="side" aria-label="Passage threads and highlights">
+      <aside
+        className={threadHeight != null ? 'side side-thread-resized' : 'side'}
+        data-thread-resized={threadHeight != null ? 'true' : 'false'}
+        aria-label="Passage threads and highlights"
+      >
         {error ? <p className="error" role="alert">{error}</p> : null}
+
+        <div className="export-row">
+          <button
+            type="button"
+            className="btn-ghost"
+            data-testid="export-pdf-btn"
+            onClick={exportPdf}
+            disabled={exporting}
+            aria-label={exporting ? 'Preparing reading session PDF' : 'Export reading session as PDF'}
+          >
+            {exporting ? 'Preparing PDF…' : 'Export PDF'}
+          </button>
+          {exportError ? <span className="error" role="alert">{exportError}</span> : null}
+        </div>
 
         {openThreadId ? (
           <div
             className="thread-card"
             onClick={handleCompactExpand}
             key={openThreadId}
+            ref={threadCardRef}
             data-thread-id={openThreadId}
             data-passage-id={activePassageId ?? ''}
             data-anchor-id={activeAnchorId ?? ''}
+            data-resized={threadHeight != null ? 'true' : 'false'}
+            style={threadHeight != null ? { height: threadHeight, flex: '0 0 auto' } : undefined}
           >
             <div className="thread-head">
               <div className="meta">Passage thread</div>
@@ -1021,6 +1161,27 @@ export function ReaderClient(props: {
                   Close and return to reading
                 </button>
               </div>
+            </div>
+            <div
+              className="thread-resize"
+              data-testid="thread-resize-handle"
+              role="slider"
+              tabIndex={0}
+              aria-label="Resize passage thread height"
+              aria-valuemin={THREAD_MIN_H}
+              aria-valuemax={threadMaxHeight()}
+              aria-valuenow={threadHeight ?? undefined}
+              aria-valuetext={threadHeight != null ? `${threadHeight} pixels tall` : 'Automatic height'}
+              title="Drag to resize the thread (double-click to reset)"
+              onPointerDown={onResizePointerDown}
+              onPointerMove={onResizePointerMove}
+              onPointerUp={endResizeDrag}
+              onPointerCancel={endResizeDrag}
+              onClick={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => { e.stopPropagation(); setThreadHeight(null); }}
+              onKeyDown={onResizeKeyDown}
+            >
+              <span aria-hidden="true" className="thread-resize-grip" />
             </div>
           </div>
         ) : busy ? (

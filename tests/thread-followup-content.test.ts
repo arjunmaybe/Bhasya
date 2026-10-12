@@ -34,12 +34,14 @@ describe('thread follow-up answers the new question', () => {
       expect(follow.threadId).toBe(initial.threadId);
       expect(follow.modelId).toBe('dev-grounded-1');
 
-      // New answer, observably different — and Q-conditioned, not just different.
+      // New answer, observably different — a direct grounded answer to Q, never
+      // an echo or discussion of the request wording itself.
       expect(T1).not.toBe(T0);
-      expect(T1).toContain('concrete example');
-      expect(T1).toContain(Q);
-      // Still grounded in the selected passage.
       expect(T1).toContain(selA);
+      expect(T1).not.toContain(Q);
+      for (const phrase of ['you asked', 'considering', 'relevant point', 'answering that from the passage']) {
+        expect(T1.toLowerCase(), `meta-language: "${phrase}"`).not.toContain(phrase);
+      }
 
       // Thread now holds initial pair + follow-up pair.
       const msgs = (await svc.db.query(
