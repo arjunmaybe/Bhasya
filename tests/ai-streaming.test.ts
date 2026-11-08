@@ -82,7 +82,9 @@ describe('provider streaming', () => {
   it('dev adapter streamed accumulation equals explain() text exactly', async () => {
     const adapter = new DevGroundedAdapter();
     const input: ExplainInput = {
-      selection: 'rarest and purest form of generosity',
+      // Long enough that the grounded direct answer spans more than one
+      // 120-char stream slice (direct answers use selection wording only).
+      selection: 'Attention is the rarest and purest form of generosity, and to attend fully to a passage is to give it time and steady focus without rushing ahead too quickly.',
       nearbyContext: ['Attention is the rarest and purest form of generosity.'],
       userRequest: 'what does this mean in practice?',
       title: 'The Craft of Reading',
@@ -397,7 +399,10 @@ describe('streaming API routes (SSE)', () => {
       const dones = events.filter((e) => e.event === 'done');
       expect(dones.length).toBe(1);
       expect(dones[0].data.threadId).toBe(firstJson.threadId);
-      expect(String(dones[0].data.text)).toContain(Q);
+      // Direct grounded answer: passage substance, never the request echoed.
+      expect(String(dones[0].data.text)).toContain('Readers who annotate remember more');
+      expect(String(dones[0].data.text)).not.toContain(Q);
+      expect(String(dones[0].data.text).toLowerCase()).not.toContain('you asked');
       const tj = (await (await call(`/api/threads/${firstJson.threadId}`)).json()) as any;
       expect(tj.messages.length).toBe(4);
       expect(String(tj.messages[2].content)).toBe(Q);
@@ -545,6 +550,10 @@ describe('Reader streaming UI (static contract)', () => {
     expect(s).toMatch(/\/explain\/stream/);
     expect(s).toMatch(/\/api\/threads\/explain/);
     expect(s).toMatch(/\/api\/threads\/\$\{threadId\}\/messages/);
-    expect(s).toMatch(/streamAbortRef/);
+    // Independent cancellation lanes: Explain and follow-up own separate
+    // controllers (never one shared ref that lets either flow cancel the other).
+    expect(s).toMatch(/explainLane/);
+    expect(s).toMatch(/followupLane/);
+    expect(s).not.toMatch(/streamAbortRef/);
   });
 });

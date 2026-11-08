@@ -1,7 +1,9 @@
 node_modules/
 apps/web/.next/
+apps/web/.next-dev/
 apps/web/out/
 .bhasya-pglite/
+apps/api/.bhasya-pglite.corrupt-*/
 .bhasya-objects/
 *.tsbuildinfo
 dist/

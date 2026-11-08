@@ -103,9 +103,25 @@ Do NOT invent a second document model. Do NOT collapse to `Document → text →
 ## Deferred (do NOT pull forward)
 
 browser extension, Tauri desktop, offline sync, SQLite replica, anchor remapping
-workflows, PDF/EPUB/Markdown/DOCX conversion UI, conversion artifacts beyond
+workflows, EPUB/Markdown/DOCX conversion UI, conversion artifacts beyond
 Phase 1, Qdrant, GraphRAG, CRDTs, advanced model routing, collaborative editing,
 billing, large-scale export.
+
+## Reading-session PDF export (narrow addition, not a phase)
+
+The canonical document remains the source of truth: export renders
+`document_versions` / `document_nodes` / `passage` rows plus the caller's own
+persisted threads, messages, evidence, and citations — appended as a "Bhasya
+Reading Session" appendix after the article. No second document model exists;
+the raw stored HTML is never parsed for export. PDF generation is synchronous
+in this MVP (`POST /api/documents/:versionId/exports` → `GET /api/exports/:id`,
+bytes served through the authorized API from the private `StoragePort`
+`exports/<versionId>/<exportId>.pdf` key); async export jobs are deferred, and
+the `exports.status` column reserves that path. This feature is Bhasya-native:
+Catalyst is not its source and no Catalyst code or provenance is involved.
+Media conversion is out of scope — figures/images from the original page are
+omitted (captions render as text), as are author/byline, tables, and rich
+links the canonical model does not preserve.
 
 ## Phase 1 build order
 

@@ -23,11 +23,13 @@
     "app/**/*",
     "components/**/*",
     "lib/**/*",
-    "next.config.js",
-    ".next/types/**/*.ts"
+    "next.config.mjs",
+    ".next/types/**/*.ts",
+    ".next-dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",
-    ".next"
+    ".next",
+    ".next-dev"
   ]
 }

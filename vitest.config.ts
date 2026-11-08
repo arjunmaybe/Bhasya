@@ -6,5 +6,11 @@ export default defineConfig({
     testTimeout: 60000,
     hookTimeout: 60000,
     pool: 'forks',
+    // Narrow test-infra fix: boot ONE embedded-Postgres cluster serially
+    // before workers start (no PGlite contention), shared by the two
+    // hyperdrive-* files via per-file databases. All other files unaffected
+    // and still run in parallel; no global sequential suite, no timeout
+    // changes.
+    globalSetup: ['tests/global-setup.embedded-pg.ts'],
   },
 });

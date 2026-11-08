@@ -37,6 +37,8 @@ export const api = {
   getCitation: (id: string): Promise<{ citation: CitationDto }> => req(`/api/citations/${id}`),
   postMessage: (threadId: string, content: string): Promise<ExplainResult> =>
     req(`/api/threads/${threadId}/messages`, { method: 'POST', body: JSON.stringify({ content }) }),
+  requestExport: (versionId: string): Promise<ExportResult> =>
+    req(`/api/documents/${versionId}/exports`, { method: 'POST' }),
 };
 
 export interface HighlightDto {
@@ -47,6 +49,11 @@ export interface HighlightDto {
 export interface ExplainResult {
   threadId: string; userMessageId: string; assistantMessageId: string;
   text: string; modelId: string; citationIds: string[];
+}
+
+export interface ExportResult {
+  exportId: string; byteSize: number; threadCount: number;
+  messageCount: number; truncated: boolean; downloadUrl: string;
 }
 
 export interface ThreadDetail {
