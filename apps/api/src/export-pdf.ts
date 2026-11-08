@@ -50,25 +50,172 @@ function leading(size: number): number {
   return LEADING[size];
 }
 
-/** Common Unicode punctuation mapped to safe ASCII/WinAnsi equivalents. */
+
+/** Unicode characters mapped to readable ASCII equivalents. */
 const UNICODE_MAP: Record<string, string> = {
-  '—': '--', '–': '-', '―': '--', '’': "'", '‘': "'", '‚': ',',
-  '“': '"', '”': '"', '„': '"', '•': '-', '…': '...', '→': '->',
-  '←': '<-', '§': 'S. ', '±': '+/-', '×': 'x', '÷': '/', '°': 'deg ',
-  '©': '(c)', '®': '(R)', '™': '(TM)', ' ': ' ',
+  // Punctuation
+  '—': '--',
+  '–': '-',
+  '―': '--',
+  '‐': '-',
+  '‑': '-',
+  '−': '-',
+  '’': "'",
+  '‘': "'",
+  '‚': ',',
+  '“': '"',
+  '”': '"',
+  '„': '"',
+  '•': '-',
+  '…': '...',
+  '·': ' - ',
+  '′': "'",
+  '″': '"',
+
+  // Arrows
+  '→': '->',
+  '←': '<-',
+  '↩': '<-',
+  '↪': '->',
+  '⇒': '=>',
+  '⇐': '<=',
+  '⇔': '<=>',
+  '↑': '^',
+  '↓': 'v',
+  '↔': '<->',
+
+  // Mathematical symbols
+  '§': 'S. ',
+  '±': '+/-',
+  '×': 'x',
+  '÷': '/',
+  '°': 'deg ',
+  '≤': '<=',
+  '≥': '>=',
+  '≠': '!=',
+  '≈': '~',
+  '∞': 'infinity',
+  '√': 'sqrt',
+  '∑': 'sum',
+  '∫': 'integral',
+
+  // Fractions
+  '¼': '1/4',
+  '½': '1/2',
+  '¾': '3/4',
+  '⅐': '1/7',
+  '⅛': '1/8',
+  '⅜': '3/8',
+  '⅝': '5/8',
+  '⅞': '7/8',
+  '⅓': '1/3',
+  '⅔': '2/3',
+
+  // Currency
+  '£': 'GBP ',
+  '€': 'EUR ',
+  '¥': 'JPY ',
+  '₹': 'INR ',
+  '¢': 'cents ',
+
+  // Greek letters
+  'α': 'alpha',
+  'β': 'beta',
+  'γ': 'gamma',
+  'δ': 'delta',
+  'ε': 'epsilon',
+  'θ': 'theta',
+  'λ': 'lambda',
+  'μ': 'mu',
+  'ν': 'nu',
+  'π': 'pi',
+  'ρ': 'rho',
+  'σ': 'sigma',
+  'τ': 'tau',
+  'φ': 'phi',
+  'ω': 'omega',
+  'Δ': 'Delta',
+  'Σ': 'Sigma',
+  'Ω': 'Omega',
+
+  // Superscripts and subscripts
+  '²': '^2',
+  '³': '^3',
+  '⁴': '^4',
+  '⁵': '^5',
+  '⁶': '^6',
+  '⁷': '^7',
+  '⁸': '^8',
+  '⁹': '^9',
+  '₀': '0',
+  '₁': '1',
+  '₂': '2',
+  '₃': '3',
+  '₄': '4',
+  '₅': '5',
+
+  // Other symbols
+  '⌘': 'Cmd',
+  '©': '(c)',
+  '®': '(R)',
+  '™': '(TM)',
+  'µ': 'micro',
+
+  // Latin letters without direct ASCII equivalents
+  'æ': 'ae',
+  'Æ': 'AE',
+  'œ': 'oe',
+  'Œ': 'OE',
+  'ß': 'ss',
+  'ø': 'o',
+  'Ø': 'O',
+  'ł': 'l',
+  'Ł': 'L',
+  'đ': 'd',
+  'Đ': 'D',
 };
 
-/** Strip anything outside printable ASCII after mapping common punctuation. */
+/**
+ * Converts Unicode text into readable ASCII.
+ *
+ * Explicit mappings handle symbols, fractions and Greek letters.
+ * NFKD normalization handles accented Latin characters.
+ * Unsupported symbols fall back to '?'.
+ */
 export function toSafePdfText(text: string): string {
   let out = '';
+
   for (const ch of text) {
-    if (ch >= ' ' && ch <= '~') out += ch;
-    else if (UNICODE_MAP[ch] !== undefined) out += UNICODE_MAP[ch];
-    else if (ch === '\n' || ch === '\r' || ch === '\t') out += ' ';
-    else out += '?';
+    if (ch >= ' ' && ch <= '~') {
+      out += ch;
+      continue;
+    }
+
+    if (UNICODE_MAP[ch] !== undefined) {
+      out += UNICODE_MAP[ch];
+      continue;
+    }
+
+    if (ch === '\n' || ch === '\r' || ch === '\t') {
+      out += ' ';
+      continue;
+    }
+
+    // Decompose accented characters, e.g. é -> e + combining accent.
+    const decomposed = ch.normalize('NFKD').replace(/\p{M}/gu, '');
+
+    if (decomposed === '') continue;
+
+    if (/^[\x20-\x7E]+$/.test(decomposed)) {
+      out += decomposed;
+    } else {
+      out += '?';
+    }
   }
+
   return out.replace(/[ ]{2,}/g, ' ');
 }
+
 
 /** Greedy word wrap; overlong tokens are hard-split so nothing overflows. */
 export function wrapPdfText(text: string, maxWidth: number, measure: (s: string) => number): string[] {
@@ -126,6 +273,15 @@ function ensureSpace(cursor: LayoutCursor, needed: number): void {
   if (cursor.y - needed < MARGIN_BOTTOM) newPage(cursor);
 }
 
+/**
+ * Keep a heading with the start of its body: require room for the heading
+ * plus two body lines before drawing it, so headings never strand alone at
+ * a page bottom.
+ */
+function ensureHeadingBlock(cursor: LayoutCursor, headSize: number, bodySize: number): void {
+  ensureSpace(cursor, 4 + leading(headSize) + 6 + 2 * leading(bodySize));
+}
+
 function drawLines(
   cursor: LayoutCursor,
   lines: string[],
@@ -157,6 +313,19 @@ function drawWrapped(
   const width = (opts.width ?? CONTENT_WIDTH) - ((opts.x ?? MARGIN_X) - MARGIN_X);
   const lines = wrapPdfText(text, width, (s) => measure(s, opts.size, opts.font));
   if (lines.length === 0) return;
+
+  // Keep a paragraph or other short text block together when it fits
+  // on a fresh page. Long blocks may still split across pages.
+  const blockHeight = lines.length * leading(opts.size) + (opts.gapAfter ?? 4);
+  const freshPageCapacity = EXPORT_PDF_PAGE_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM;
+
+  if (
+    blockHeight <= freshPageCapacity &&
+    cursor.y - blockHeight < MARGIN_BOTTOM
+  ) {
+    newPage(cursor);
+  }
+
   drawLines(cursor, lines, opts);
 }
 
@@ -180,6 +349,9 @@ export function layoutExportIR(ir: ExportIR, measure: TextMeasurer): PdfLayout {
     ['Passages', String(doc.passageCount)],
     ['Threads', String(ir.totals.threadCount)],
     ['Questions & answers', String(ir.totals.messageCount)],
+    // Provenance lives on the cover: a separate post-article Source block
+    // could land alone on a page tail and produce a near-blank page.
+    ['Content hash', doc.contentHash.slice(0, 12)],
     ['Generated', ir.generatedAt],
   ];
   for (const [k, v] of meta) {
@@ -205,41 +377,93 @@ export function layoutExportIR(ir: ExportIR, measure: TextMeasurer): PdfLayout {
   }
 
   // ── Part 1: article ──
+  ensureHeadingBlock(cursor, 16, 11);
   drawWrapped(cursor, 'Article', measure, { size: 16, font: 'bold', marker: 'article-heading', gapAfter: 6 });
   if (ir.nodes.length === 0) {
     drawWrapped(cursor, 'No readable text preserved for this version.', measure, {
       size: 11, font: 'italic', gapAfter: 4,
     });
   }
-  for (const n of ir.nodes) {
-    switch (n.kind) {
-      case 'heading':
-        cursor.y -= 4;
-        drawWrapped(cursor, n.text, measure, { size: 14, font: 'bold', gapAfter: 5 });
-        break;
-      case 'list_item':
+let inFootnotesSection = false;
+let footnoteNumber = 0;
+for (const n of ir.nodes) {
+  switch (n.kind) {
+    case 'heading':
+      inFootnotesSection = n.text.trim().toLowerCase() === 'footnotes';
+
+      if (inFootnotesSection) {
+        footnoteNumber = 0;
+      }
+
+      ensureHeadingBlock(cursor, 14, 11);
+      drawWrapped(cursor, n.text, measure, {
+        size: 14,
+        font: 'bold',
+        gapAfter: 5,
+      });
+      break;
+
+    case 'list_item':
+      if (inFootnotesSection) {
+        footnoteNumber += 1;
+
+        drawWrapped(cursor, `${footnoteNumber}. ${n.text}`, measure, {
+          size: 11,
+          font: 'regular',
+          x: MARGIN_X + 18,
+          width: CONTENT_WIDTH - 18,
+          gapAfter: 3,
+        });
+      } else {
         drawWrapped(cursor, `- ${n.text}`, measure, {
-          size: 11, font: 'regular', x: MARGIN_X + 18, width: CONTENT_WIDTH - 18, gapAfter: 3,
+          size: 11,
+          font: 'regular',
+          x: MARGIN_X + 18,
+          width: CONTENT_WIDTH - 18,
+          gapAfter: 3,
         });
-        break;
-      case 'quote':
-        drawWrapped(cursor, n.text, measure, {
-          size: 10.5, font: 'italic', x: MARGIN_X + 18, width: CONTENT_WIDTH - 18, gapAfter: 5,
-        });
-        break;
-      case 'code':
-        drawWrapped(cursor, n.text, measure, {
-          size: 9.5, font: 'mono', x: MARGIN_X + 18, width: CONTENT_WIDTH - 18, gapAfter: 5,
-        });
-        break;
-      case 'caption':
-        drawWrapped(cursor, n.text, measure, { size: 10, font: 'italic', gapAfter: 5, marker: 'caption' });
-        break;
-      default:
-        drawWrapped(cursor, n.text, measure, { size: 11, font: 'regular', gapAfter: 5 });
-        break;
-    }
+      }
+      break;
+
+    case 'quote':
+      drawWrapped(cursor, n.text, measure, {
+        size: 10.5,
+        font: 'italic',
+        x: MARGIN_X + 18,
+        width: CONTENT_WIDTH - 18,
+        gapAfter: 5,
+      });
+      break;
+
+    case 'code':
+      drawWrapped(cursor, n.text, measure, {
+        size: 9.5,
+        font: 'mono',
+        x: MARGIN_X + 18,
+        width: CONTENT_WIDTH - 18,
+        gapAfter: 5,
+      });
+      break;
+
+    case 'caption':
+      drawWrapped(cursor, n.text, measure, {
+        size: 10,
+        font: 'italic',
+        gapAfter: 5,
+        marker: 'caption',
+      });
+      break;
+
+    default:
+      drawWrapped(cursor, n.text, measure, {
+        size: 11,
+        font: 'regular',
+        gapAfter: 5,
+      });
+      break;
   }
+}
+
   if (ir.truncation.passagesOmitted > 0) {
     drawWrapped(cursor, `[Article truncated: showing first ${ir.nodes.length} blocks, ${ir.truncation.passagesOmitted} further passages omitted.]`, measure, {
       size: 10, font: 'italic', marker: 'article-truncated', gapAfter: 4,
@@ -249,16 +473,32 @@ export function layoutExportIR(ir: ExportIR, measure: TextMeasurer): PdfLayout {
     drawWrapped(cursor, ir.mediaNote, measure, { size: 10, font: 'italic', marker: 'media-note', gapAfter: 4 });
   }
 
-  drawWrapped(cursor, 'Source', measure, { size: 13, font: 'bold', marker: 'source-heading', gapAfter: 4 });
-  if (doc.sourceUrl.length > 0) {
-    drawWrapped(cursor, doc.sourceUrl, measure, { size: 10, font: 'regular', gapAfter: 1 });
-  }
-  drawWrapped(cursor, `Version ${doc.versionNo} · content ${doc.contentHash.slice(0, 12)}`, measure, {
-    size: 10, font: 'regular', gapAfter: 1,
-  });
-
   // ── Part 2: appendix on a fresh page (hard break) ──
-  newPage(cursor);
+  // Provenance (source URL, version, content hash) is consolidated on the
+  // cover above, so there is no trailing Source block that could land alone
+  // on a page tail and create a near-blank page before the appendix.
+  // Skip the break when the article already ended at a fresh page top;
+  // otherwise the divider strands alone on a near-empty page of its own.
+  if (cursor.ops.some((o) => o.page === cursor.page)) newPage(cursor);
+  // Keep the divider with the first appendix content: reserve divider +
+  // subtitle + first thread title as one block, so a page tail holding only
+  // the divider can never strand it away from its threads.
+  const dividerTitle = 'Bhasya Reading Session';
+  const dividerSub =
+    'Explanations and follow-ups for this document, each anchored to the passage it explains.';
+  const firstTitle =
+    ir.threads.length > 0 ? `${ir.threads[0].position}. ${ir.threads[0].anchorExcerpt}` : null;
+  const dividerNeed =
+    wrapPdfText(dividerTitle, CONTENT_WIDTH, (s) => measure(s, 16, 'bold')).length * leading(16) + 4 +
+    wrapPdfText(dividerSub, CONTENT_WIDTH, (s) => measure(s, 11, 'italic')).length * leading(11) + 8;
+  ensureSpace(
+    cursor,
+    firstTitle === null
+      ? dividerNeed + leading(11) + 4
+      : dividerNeed + 4 +
+          wrapPdfText(firstTitle, CONTENT_WIDTH, (s) => measure(s, 13, 'bold')).length * leading(13) + 3,
+  );
+  ensureHeadingBlock(cursor, 16, 11);
   drawWrapped(cursor, 'Bhasya Reading Session', measure, {
     size: 16, font: 'bold', marker: 'appendix-divider', gapAfter: 4,
   });
@@ -271,11 +511,12 @@ export function layoutExportIR(ir: ExportIR, measure: TextMeasurer): PdfLayout {
     });
   }
   for (const t of ir.threads) {
-    cursor.y -= 4;
+    ensureHeadingBlock(cursor, 13, 11);
     drawWrapped(cursor, `${t.position}. ${t.anchorExcerpt}`, measure, {
       size: 13, font: 'bold', marker: `thread-${t.position}`, gapAfter: 3,
     });
-    const where = t.sectionLabel ? `From ${t.sectionLabel} · ${t.anchorPath}` : t.anchorPath;
+    // Human-readable location; internal structural paths stay out of output.
+    const where = t.location ?? '';
     if (where.length > 0) {
       drawWrapped(cursor, where, measure, { size: 10, font: 'italic', marker: `thread-${t.position}-location`, gapAfter: 4 });
     }
@@ -284,8 +525,7 @@ export function layoutExportIR(ir: ExportIR, measure: TextMeasurer): PdfLayout {
     }
     for (const m of t.messages) {
       const label = m.role === 'user' ? 'Question' : 'Bhasya';
-      const suffix = m.role === 'assistant' && m.modelId ? ` · ${m.modelId}` : '';
-      drawWrapped(cursor, `${label}${suffix}`, measure, { size: 10, font: 'bold', gapAfter: 1 });
+      drawWrapped(cursor, label, measure, { size: 10, font: 'bold', gapAfter: 1 });
       // over-long content already carries its '[truncated]' marker from IR.
       drawWrapped(cursor, m.content, measure, { size: 11, font: 'regular', gapAfter: 4 });
     }
@@ -296,11 +536,9 @@ export function layoutExportIR(ir: ExportIR, measure: TextMeasurer): PdfLayout {
         size: 10.5, font: 'italic', x: MARGIN_X + 18, width: CONTENT_WIDTH - 18, gapAfter: 4,
       });
     }
-    if (t.citations.length > 0) {
-      drawWrapped(cursor, `Citations: ${t.citations.map((c) => c.label).join(', ')}`, measure, {
-        size: 10, font: 'regular', gapAfter: 4,
-      });
-    }
+    // Per-thread citation labels are not repeated here: the consolidated
+    // citation index below carries every label with its thread reference.
+    // Evidence quotes stay in place; they appear nowhere else.
   }
   if (ir.truncation.threadsOmitted > 0 || ir.truncation.messagesOmitted > 0 || ir.truncation.charsTruncated > 0) {
     const parts: string[] = [];
@@ -313,17 +551,18 @@ export function layoutExportIR(ir: ExportIR, measure: TextMeasurer): PdfLayout {
   }
 
   // Citation index references thread sections (stable without page math).
+  // Labels only: structural paths stay out of reader-facing output.
   const allCites = ir.threads.flatMap((t) =>
-    t.citations.map((c) => ({ thread: t.position, label: c.label, path: c.passagePath })),
+    t.citations.map((c) => ({ thread: t.position, label: c.label })),
   );
   if (allCites.length > 0) {
     cursor.y -= 4;
+    ensureHeadingBlock(cursor, 13, 10);
     drawWrapped(cursor, 'Evidence and citations', measure, {
       size: 13, font: 'bold', marker: 'citation-index', gapAfter: 4,
     });
     allCites.forEach((c, i) => {
-      const where = c.path.length > 0 ? ` — ${c.path}` : '';
-      drawWrapped(cursor, `[${i + 1}] ${c.label} (thread ${c.thread})${where}`, measure, {
+      drawWrapped(cursor, `[${i + 1}] ${c.label} (thread ${c.thread})`, measure, {
         size: 10, font: 'regular', gapAfter: 1,
       });
     });

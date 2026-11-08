@@ -48,6 +48,15 @@ describe('inline markup normalization (browser-visible text semantics)', () => {
     ]);
   });
 
+    it('keeps the default pointer hint and excludes the touch-only alternative', () => {
+    expect(
+      passageTexts(
+        `<p>Try <span class="hint-touch">pinching to zoom in</span>` +
+          `<span class="hint-pointer">dragging to zoom in</span> now.</p>`,
+      ),
+    ).toEqual(['Try dragging to zoom in now.']);
+  });
+
   it('4. structural boundaries still separate content', () => {
     expect(passageTexts(`<p>First.</p><p>Second.</p>`)).toEqual(['First.', 'Second.']);
     expect(passageTexts(`<ul><li>One</li><li>Two</li></ul>`)).toEqual(['One', 'Two']);
@@ -70,6 +79,81 @@ describe('inline markup normalization (browser-visible text semantics)', () => {
     const loc = locateSelection(passage, 'forgetful\nCPU,  needs');
     expect(loc).not.toBeNull();
     expect(loc!.start).toBe(4);
+  });
+});
+
+describe('export extraction hardening (website code and container duplication)', () => {
+  const MESSY_HTML = `<!doctype html><html><head><title>Messy</title>
+<script>window.analyticsTrack("pageview");var cfg={"a":1};</script>
+<style>.proto{color:red;font-weight:bold}</style>
+<script type="application/ld+json">{"@type":"Article","articleBody":"hidden"}</script>
+</head><body>
+<div class="container"><p>Real first paragraph.</p><p>Real second paragraph.</p></div>
+<div class="para">Standalone div leaf.</div>
+<noscript>noscript fallback words</noscript>
+<template><p>template ghost words</p></template>
+</body></html>`;
+
+  it('excludes scripts, styles, JSON-LD, noscript, template, and head content', () => {
+    const texts = passageTexts(MESSY_HTML);
+    const joined = texts.join(' | ');
+    for (const leak of [
+      'analyticsTrack', 'cfg', 'articleBody', '.proto', 'font-weight',
+      'noscript', 'template ghost', 'Messy',
+    ]) {
+      expect(joined).not.toContain(leak);
+    }
+    expect(texts).toContain('Real first paragraph.');
+    expect(texts).toContain('Real second paragraph.');
+    expect(texts).toContain('Standalone div leaf.');
+  });
+
+  it('preserves trailing direct text after a nested div closes', () => {
+    expect(
+      passageTexts(
+        `<div class="outer"><div class="inner"><p>Body.</p></div >tail here</div >`,
+      ),
+    ).toEqual(['Body.', 'tail here']);
+  });
+  it('does not duplicate generic nested div containers', () => {
+    expect(passageTexts(`<div class="wrap"><p>One.</p><p>Two.</p></div>`)).toEqual([
+      'One.',
+      'Two.',
+    ]);
+  });
+
+  it('keeps div leaves with only inline content', () => {
+    expect(passageTexts(`<div class="para">Solo <b>leaf</b>.</div>`)).toEqual(['Solo leaf.']);
+  });
+
+  it('decodes numeric and common named entities', () => {
+    expect(passageTexts(`<p>Return&#8617; here.</p>`)).toEqual(['Return↩ here.']);
+    expect(passageTexts(`<p>Em&#x2014;dash &mdash; done.</p>`)).toEqual(['Em—dash — done.']);
+  });
+
+  it('keeps article text around nav, footer, and sidebar chrome in order', () => {
+    const texts = passageTexts(
+      `<nav><ul><li>Home</li><li>Sections</li></ul></nav>` +
+        `<article><h2>Real Section</h2><p>Real article paragraph.</p></article>` +
+        `<aside><ul><li>Related story</li></ul></aside>` +
+        `<footer><p>Footnote one text.</p></footer>`,
+    );
+    const joined = texts.join(' | ');
+    expect(joined).not.toContain('Home');
+    expect(joined).not.toContain('Sections');
+    expect(joined).not.toContain('Related story');
+    expect(texts).toContain('Real article paragraph.');
+    // Footnote material is legitimate content: kept, but ordered last.
+    expect(texts).toContain('Footnote one text.');
+    expect(texts.indexOf('Real article paragraph.')).toBeLessThan(
+      texts.indexOf('Footnote one text.'),
+    );
+  });
+
+  it('preserves trailing direct text after a nested paragraph', () => {
+    expect(passageTexts(`<div><p>Body.</p>tail here</div>`)).toEqual(['Body.', 'tail here']);
+    expect(passageTexts(`<div><p>Body.</p>   </div>`)).toEqual(['Body.']);
+    expect(passageTexts(`<div>lead words<p>Body.</p></div>`)).toEqual(['lead words', 'Body.']);
   });
 });
 

@@ -4,7 +4,7 @@ import { getAuthForDb, getIdentityForRequest } from '@bhasya/db';
 import { logEvent } from '@bhasya/db';
 import { HttpError, authorize } from '../../../authorization/resource-resolvers.js';
 import { explainSelection, getServices, ingestSource, reingestSource, resolveAnchor, streamExplainSelection } from './services.js';
-import { createReadingSessionExport, getExportForDownload } from './export-service.js';
+import { createReadingSessionExport, getExportForDownload, sortNodesForExport } from './export-service.js';
 import type { ExplainArgs, ExplainStreamEvent, Identity } from './services.js';
 import { CreateHighlightSchema, CreateThreadSchema, ExplainSchema, IngestSchema, PostMessageSchema, ResolveAnchorSchema } from './schema.js';
 import { withTransaction } from '../../../db/transactions.js';
@@ -95,23 +95,63 @@ export function createApp(): Hono {
     } catch (e) { return err(c, e); }
   });
 
-  app.get('/api/documents/:versionId/tree', async (c) => {
+    app.get('/api/documents/:versionId/tree', async (c) => {
     try {
       const svc = await getServices();
-      const identity = await getIdentityForRequest(svc.db, c.req.raw.headers, { env: ((c as unknown as { env?: Record<string, unknown> }).env ?? {}) });
+      const identity = await getIdentityForRequest(svc.db, c.req.raw.headers, {
+        env: ((c as unknown as { env?: Record<string, unknown> }).env ?? {}),
+      });
+
       if (!identity) return c.json({ error: 'unauthenticated' }, 401);
+
       const versionId = c.req.param('versionId');
       await authorize(svc.db, identity, 'document_version', versionId);
-      const nodes = (await svc.db.query(
-        `SELECT id, parent_id, node_type, ordinal, depth, structural_path, text FROM document_nodes WHERE document_version_id = $1 ORDER BY structural_path`, [versionId],
-      )).rows;
-      const passages = (await svc.db.query(
-        `SELECT id, node_id, ordinal, structural_path, text FROM passages WHERE document_version_id = $1 ORDER BY structural_path, ordinal`, [versionId],
-      )).rows;
-      return c.json({ nodes, passages });
-    } catch (e) { return err(c, e); }
-  });
 
+      // Fetch nodes without lexical structural_path ordering.
+      const nodeRows = (await svc.db.query(
+        `SELECT id, parent_id, node_type, ordinal, depth, structural_path, text
+           FROM document_nodes
+          WHERE document_version_id = $1`,
+        [versionId],
+      )).rows;
+
+      // Apply hierarchical numeric preorder.
+      const nodes = sortNodesForExport(nodeRows);
+
+      // Record each node's position in the ordered document tree.
+      const nodePosition = new Map<string, number>();
+
+      nodes.forEach((node, index) => {
+        nodePosition.set(String(node.id), index);
+      });
+
+      // Fetch passages without lexical structural_path ordering.
+      const passageRows = (await svc.db.query(
+        `SELECT id, node_id, ordinal, structural_path, text
+           FROM passages
+          WHERE document_version_id = $1`,
+        [versionId],
+      )).rows;
+
+      // Passages follow their associated nodes in document order.
+      const passages = passageRows.sort((a: any, b: any) => {
+        const positionA =
+          nodePosition.get(String(a.node_id)) ?? Number.MAX_SAFE_INTEGER;
+
+        const positionB =
+          nodePosition.get(String(b.node_id)) ?? Number.MAX_SAFE_INTEGER;
+
+        return (
+          positionA - positionB ||
+          Number(a.ordinal ?? 0) - Number(b.ordinal ?? 0)
+        );
+      });
+
+      return c.json({ nodes, passages });
+    } catch (e) {
+      return err(c, e);
+    }
+  });
   app.get('/api/documents/:versionId/passages', async (c) => {
     try {
       const svc = await getServices();

@@ -5,7 +5,7 @@ import { createApp } from '../apps/api/src/app.js';
 import { resolveAnchor, explainSelection, setServices } from '../apps/api/src/services.js';
 import { createReadingSessionExport } from '../apps/api/src/export-service.js';
 import { toSafePdfText } from '../apps/api/src/export-pdf.js';
-import { ingestSample, makeServices } from './helpers.js';
+import { ingestSample, makeServices, publicDns } from './helpers.js';
 
 /** Expected content must match renderer output: sanitized to ASCII. */
 const pdfText = (s: string): string => toSafePdfText(String(s));
@@ -128,8 +128,63 @@ describe('export API: threads, ordering, evidence, citations', () => {
       expect(text).toContain('Evidence (exact passage)');
       expect(text).toContain('Cited passage');
       expect(text).toContain('Evidence and citations');
+      // Citation labels are consolidated in the index, not repeated per thread.
+      expect(text).not.toContain('Citations:');
     } finally {
       setServices(null);
+      await cleanup();
+    }
+  });
+
+  it('deduplicates repeated persisted evidence within a thread, not across threads', async () => {
+    const { svc, identity, cleanup, versionId } = await setupDoc();
+    try {
+      const first = await explain(svc, identity, versionId, SEL_A);
+      const msg = (await svc.db.query(
+        `SELECT id FROM thread_messages WHERE thread_id = $1 AND role = 'assistant' ORDER BY created_at LIMIT 1`,
+        [first.threadId],
+      )).rows[0] as any;
+      const ev = (await svc.db.query(
+        `SELECT e.id, e.passage_id, e.document_version_id, e.quote, e.scope_level,
+                p.structural_path AS passage_path
+           FROM evidence e JOIN passages p ON p.id = e.passage_id
+          WHERE e.thread_message_id = $1 ORDER BY e.rank LIMIT 1`,
+        [msg.id],
+      )).rows[0] as any;
+      // Simulate the persisted duplication seen in the wild: the same
+      // evidence identity inserted repeatedly, each with its own citation.
+      for (let i = 0; i < 2; i += 1) {
+        const dup = (await svc.db.query(
+          `INSERT INTO evidence (thread_message_id, passage_id, document_version_id, score, rank, scope_level, quote)
+           VALUES ($1,$2,$3,1.0,$4,$5,$6) RETURNING id`,
+          [msg.id, ev.passage_id, ev.document_version_id, 10 + i, ev.scope_level, ev.quote],
+        )).rows[0] as any;
+        await svc.db.query(
+          `INSERT INTO citations (evidence_id, label) VALUES ($1,$2)`,
+          [dup.id, 'Cited passage'],
+        );
+      }
+      // A second thread with the same evidence identity keeps its own copy.
+      await explain(svc, identity, versionId, SEL_A);
+      let captured: any = null;
+      await createReadingSessionExport(svc, identity, versionId, {
+        renderPdf: async (ir) => { captured = ir; return new Uint8Array([1]); },
+      });
+      expect(captured.threads).toHaveLength(2);
+      const sameEvidence = (t: any) => t.evidence.filter(
+        (e: any) => e.scopeLevel === ev.scope_level && e.quote === ev.quote,
+      );
+      expect(sameEvidence(captured.threads[0])).toHaveLength(1);
+      expect(sameEvidence(captured.threads[1])).toHaveLength(1);
+      // The duplicate citation rows collapse to one presentation entry.
+      const sameCitation = (t: any) => t.citations.filter(
+        (c: any) => c.label === 'Cited passage' && c.passagePath === ev.passage_path,
+      );
+      expect(sameCitation(captured.threads[0])).toHaveLength(1);
+      expect(sameCitation(captured.threads[1])).toHaveLength(1);
+      // Persisted messages remain present in both threads.
+      expect(captured.threads.every((t: any) => t.messages.length > 0)).toBe(true);
+    } finally {
       await cleanup();
     }
   });
@@ -182,6 +237,37 @@ describe('export API: threads, ordering, evidence, citations', () => {
       expect(text).toContain(SEL_B);
       expect(text).toContain('1.');
       expect(text).toContain('2.');
+      // Document order wins over creation order (SEL_B was explained first).
+      expect(text.indexOf(SEL_A)).toBeLessThan(text.indexOf(SEL_B));
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('orders eleven sections and reverse-created threads by document position', async () => {
+    const eleven = `<!doctype html><html><head><title>Eleven Parts</title></head><body>
+<h1>Eleven Parts</h1>
+${Array.from({ length: 11 }, (_, i) => `<h2>Part ${i + 1}</h2><p>Distinctive body content alpha ${i + 1} with enough words to anchor.</p>`).join('\n')}
+</body></html>`;
+    const { svc, identity, cleanup } = await makeServices(eleven);
+    try {
+      const { ingestSource } = await import('../apps/api/src/services.js');
+      const ing = await ingestSource(svc, identity, 'https://example.com/eleven-parts', {
+        dnsResolve: publicDns,
+      });
+      const sel = (n: number) => `Distinctive body content alpha ${n} with enough words to anchor.`;
+      // Latest-section thread first: export must still follow document order.
+      await explain(svc, identity, ing.versionId, sel(11));
+      await explain(svc, identity, ing.versionId, sel(2));
+      const out = await createReadingSessionExport(svc, identity, ing.versionId);
+      expect(out.threadCount).toBe(2);
+      const bytes = await svc.storage.get(`exports/${ing.versionId}/${out.exportId}.pdf`);
+      const text = extractPdfText(bytes!);
+      // Lexical trap: '/doc/sec[10]/…' sorts before '/doc/sec[2]/…' as strings.
+      expect(text.indexOf('Part 2')).toBeGreaterThan(-1);
+      expect(text.indexOf('Part 10')).toBeGreaterThan(text.indexOf('Part 2'));
+      expect(text.indexOf('Part 11')).toBeGreaterThan(text.indexOf('Part 10'));
+      expect(text.indexOf(sel(2))).toBeLessThan(text.indexOf(sel(11)));
     } finally {
       await cleanup();
     }

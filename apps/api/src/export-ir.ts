@@ -68,6 +68,8 @@ export interface ExportThread {
   position: number;
   anchorExcerpt: string;
   anchorPath: string;
+  /** Human-readable location (section label + leaf position), rendered instead of raw paths. */
+  location: string | null;
   sectionLabel: string | null;
   threadCreatedAt: string;
   messages: ExportMessage[];
@@ -107,6 +109,8 @@ export interface ExportInputThread {
   createdAt: string;
   anchorSelectedText: string;
   anchorStructuralPath: string;
+  /** Leaf ordinal of the anchor node within its section (0 when unknown). */
+  anchorLeafOrdinal?: number;
   sectionLabel: string | null;
   messages: Array<{ role: string; content: string; model_id: string | null; created_at: string }>;
   evidence: Array<{ quote: string; scope_level: string; rank: number; passagePath: string }>;
@@ -131,6 +135,39 @@ const RENDERABLE = new Set(['heading', 'paragraph', 'list_item', 'quote', 'code'
 
 function cleanText(text: unknown): string {
   return typeof text === 'string' ? text : '';
+}
+
+/**
+ * Presentation-level dedupe identity: whitespace-normalized so cosmetic
+ * spacing differences do not create a second entry. Keeps the first row
+ * (evidence arrives rank-ordered from the service).
+ */
+function dedupeKey(...parts: string[]): string {
+  return parts.map((p) => p.replace(/\s+/g, ' ').trim()).join('\u0000');
+}
+
+function dedupeEvidence(items: ExportEvidence[]): ExportEvidence[] {
+  const seen = new Set<string>();
+  const out: ExportEvidence[] = [];
+  for (const item of items) {
+    const key = dedupeKey(item.scopeLevel, item.quote, item.passagePath);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+function dedupeCitations(items: ExportCitation[]): ExportCitation[] {
+  const seen = new Set<string>();
+  const out: ExportCitation[] = [];
+  for (const item of items) {
+    const key = dedupeKey(item.label, item.passagePath);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
 }
 
 /**
@@ -200,23 +237,33 @@ export function buildExportIR(input: ExportInput): ExportIR {
       }
     }
     messageCount += messages.length;
+    const leafOrdinal = typeof t.anchorLeafOrdinal === 'number' ? t.anchorLeafOrdinal : 0;
+    const sectionLabel =
+      typeof t.sectionLabel === 'string' && t.sectionLabel.length > 0 ? t.sectionLabel : null;
+    const location =
+      sectionLabel && leafOrdinal > 0
+        ? `${sectionLabel} – passage ${leafOrdinal}`
+        : (sectionLabel ?? (leafOrdinal > 0 ? `Passage ${leafOrdinal}` : null));
     threads.push({
       position: i + 1,
       anchorExcerpt: cleanText(t.anchorSelectedText),
       anchorPath: cleanText(t.anchorStructuralPath),
-      sectionLabel: typeof t.sectionLabel === 'string' && t.sectionLabel.length > 0 ? t.sectionLabel : null,
+      location,
+      sectionLabel,
       threadCreatedAt: cleanText(t.createdAt),
       messages,
-      evidence: t.evidence.map((e) => ({
+      // Persisted evidence/citations are never deleted; only identical
+      // presentation entries are collapsed, and only within this thread.
+      evidence: dedupeEvidence(t.evidence.map((e) => ({
         quote: cleanText(e.quote),
         scopeLevel: cleanText(e.scope_level) || 'L0',
         rank: typeof e.rank === 'number' ? e.rank : 0,
         passagePath: cleanText(e.passagePath),
-      })),
-      citations: t.citations.map((c) => ({
+      }))),
+      citations: dedupeCitations(t.citations.map((c) => ({
         label: cleanText(c.label) || 'Cited passage',
         passagePath: cleanText(c.passagePath),
-      })),
+      }))),
     });
   });
 

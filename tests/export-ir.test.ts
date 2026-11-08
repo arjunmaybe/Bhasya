@@ -9,6 +9,7 @@ import {
   buildExportIR,
   type ExportInput,
 } from '../apps/api/src/export-ir.js';
+import { sortNodesForExport } from '../apps/api/src/export-service.js';
 
 function baseInput(overrides: Partial<ExportInput> = {}): ExportInput {
   return {
@@ -153,5 +154,100 @@ describe('buildExportIR: threads and messages', () => {
   it('is deterministic for the same rows', () => {
     const input = baseInput({ threads: [thread()] });
     expect(buildExportIR(input)).toEqual(buildExportIR(baseInput({ threads: [thread()] })));
+  });
+});
+
+describe('buildExportIR: presentation dedupe', () => {
+  it('collapses identical evidence and citations within a thread only', () => {
+    const ir = buildExportIR(baseInput({
+      threads: [
+        thread({
+          evidence: [
+            { quote: 'Same quote.', scope_level: 'L0', rank: 0, passagePath: '/doc/sec[1]/p[1]' },
+            { quote: 'Same  quote.', scope_level: 'L0', rank: 1, passagePath: '/doc/sec[1]/p[1]' },
+            { quote: 'Same quote.', scope_level: 'L1', rank: 2, passagePath: '/doc/sec[1]/p[1]' },
+            { quote: 'Same quote.', scope_level: 'L0', rank: 3, passagePath: '/doc/sec[1]/p[2]' },
+            { quote: 'Distinct quote.', scope_level: 'L0', rank: 4, passagePath: '/doc/sec[1]/p[1]' },
+          ],
+          citations: [
+            { label: 'Cited passage', passagePath: '/doc/sec[1]/p[1]' },
+            { label: 'Cited passage', passagePath: '/doc/sec[1]/p[1]' },
+            { label: 'Cited passage', passagePath: '/doc/sec[1]/p[2]' },
+          ],
+        }),
+        thread({ id: 'thread-2' }),
+      ],
+    }));
+    expect(ir.threads[0].evidence).toHaveLength(4);
+    expect(ir.threads[0].evidence.map((e) => e.scopeLevel)).toEqual(['L0', 'L1', 'L0', 'L0']);
+    expect(ir.threads[0].citations).toHaveLength(2);
+    // Identical entries in another thread are kept: no cross-thread dedupe.
+    expect(ir.threads[1].evidence).toHaveLength(1);
+    expect(ir.threads[1].citations).toHaveLength(1);
+    // Persisted messages survive presentation dedupe.
+    expect(ir.threads[0].messages.map((m) => m.content)).toEqual(['Attention means giving time.']);
+  });
+});
+
+describe('hierarchical preorder sort (document order, not path strings)', () => {
+  const row = (id: string, parent_id: string | null, ordinal: number, extra: Record<string, unknown> = {}) => ({
+    id, parent_id, ordinal, node_type: 'paragraph', depth: 2, structural_path: '', text: 't', ...extra,
+  });
+
+  it('orders parents before descendants and subtrees before next siblings', () => {
+    const root = row('root', null, 0, { node_type: 'document', depth: 0 });
+    const s1 = row('s1', 'root', 1, { node_type: 'section', depth: 1 });
+    const s2 = row('s2', 'root', 2, { node_type: 'section', depth: 1 });
+    const p1 = row('p1', 's1', 1);
+    const p2 = row('p2', 's1', 2);
+    const h2 = row('h2', 's2', 0, { node_type: 'heading' });
+    const p3 = row('p3', 's2', 1);
+    const shuffled = [p3, s2, p1, root, p2, h2, s1];
+    expect(sortNodesForExport(shuffled).map((r) => r.id)).toEqual([
+      'root', 's1', 'p1', 'p2', 's2', 'h2', 'p3',
+    ]);
+  });
+
+  it('compares double-digit ordinals numerically and supports nesting', () => {
+    const root = row('root', null, 0, { node_type: 'document', depth: 0 });
+    const s2 = row('s2', 'root', 2, { node_type: 'section', depth: 1 });
+    const s10 = row('s10', 'root', 10, { node_type: 'section', depth: 1 });
+    const p10 = row('p10', 's10', 1);
+    const sub = row('sub', 's2', 1, { node_type: 'section', depth: 2 });
+    const deep = row('deep', 'sub', 1, { depth: 3 });
+    const p2 = row('p2', 's2', 2);
+    const shuffled = [p10, s10, deep, p2, sub, s2, root];
+    expect(sortNodesForExport(shuffled).map((r) => r.id)).toEqual([
+      'root', 's2', 'sub', 'deep', 'p2', 's10', 'p10',
+    ]);
+  });
+});
+
+describe('buildExportIR: appendix location and message fidelity', () => {
+  it('builds a human location from section label and leaf ordinal', () => {
+    const ir = buildExportIR(baseInput({
+      threads: [thread({ sectionLabel: 'Attention', anchorLeafOrdinal: 2 })],
+    }));
+    expect(ir.threads[0].location).toBe('Attention – passage 2');
+    expect(ir.threads[0].anchorPath).toBe('/doc/sec[1]/p[1]');
+  });
+
+  it('leaves location null without a label or ordinal', () => {
+    const ir = buildExportIR(baseInput({ threads: [thread({ sectionLabel: null })] }));
+    expect(ir.threads[0].location).toBeNull();
+  });
+
+  it('passes persisted messages through byte-faithfully, even when fragmented', () => {
+    const fragmented = 'First, the surface. Second the deeper. Third, the persists after.';
+    const ir = buildExportIR(baseInput({
+      threads: [thread({
+        messages: [
+          { role: 'user', content: 'List three points.', model_id: null, created_at: 't0' },
+          { role: 'assistant', content: fragmented, model_id: 'dev-grounded-1', created_at: 't1' },
+        ],
+      })],
+    }));
+    expect(ir.threads[0].messages[1].content).toBe(fragmented);
+    expect(ir.threads[0].messages[1].modelId).toBe('dev-grounded-1');
   });
 });

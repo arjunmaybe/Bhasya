@@ -44,6 +44,57 @@ function asRows(value: unknown): Array<Record<string, any>> {
   return [];
 }
 
+interface OrderNode {
+  id?: unknown;
+  parent_id?: unknown;
+  ordinal?: unknown;
+}
+
+/**
+ * Hierarchical preorder key: the node's ancestor ordinals from the root,
+ * compared numerically at every level. A flat (depth, ordinal) sort would
+ * place every section ahead of every paragraph; the ancestor chain keeps
+ * each parent ahead of its descendants and each subtree ahead of the next
+ * sibling's subtree, immune to double-digit lexical traps (sec[2] < sec[10]).
+ */
+export function nodePreorderKey(
+  node: OrderNode,
+  byId: Map<string, OrderNode>,
+): number[] {
+  const chain: number[] = [];
+  const seen = new Set<string>();
+  let cur: OrderNode | undefined = node;
+  while (cur && !seen.has(String(cur.id))) {
+    seen.add(String(cur.id));
+    chain.push(typeof cur.ordinal === 'number' ? cur.ordinal : 0);
+    const pid: string | null = cur.parent_id == null ? null : String(cur.parent_id);
+    cur = pid ? byId.get(pid) : undefined;
+  }
+  return chain.reverse();
+}
+
+export function compareOrdinalKeys(a: number[], b: number[]): number {
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i += 1) {
+    // A missing level means `a` is an ancestor of `b`: ancestors sort first.
+    const av = i < a.length ? a[i] : -1;
+    const bv = i < b.length ? b[i] : -1;
+    if (av !== bv) return av - bv;
+  }
+  return 0;
+}
+
+/** Stable preorder sort of canonical node rows (never parses path strings). */
+export function sortNodesForExport<T extends OrderNode>(rows: T[]): T[] {
+  const byId = new Map<string, OrderNode>();
+  for (const r of rows) byId.set(String(r.id), r);
+  const keys = new Map<T, number[]>();
+  for (const r of rows) keys.set(r, nodePreorderKey(r, byId));
+  return [...rows].sort((a, b) =>
+    compareOrdinalKeys(keys.get(a) ?? [], keys.get(b) ?? []),
+  );
+}
+
 export async function createReadingSessionExport(
   svc: Services,
   identity: Identity,
@@ -63,7 +114,7 @@ export async function createReadingSessionExport(
   if (!version) throw new HttpError(404, 'not found');
 
   const nodes = asRows(await svc.db.query(
-    `SELECT id, parent_id, node_type, depth, structural_path, text FROM document_nodes
+    `SELECT id, parent_id, node_type, ordinal, depth, structural_path, text FROM document_nodes
       WHERE document_version_id = $1 ORDER BY structural_path`,
     [versionId],
   ));
@@ -128,10 +179,31 @@ export async function createReadingSessionExport(
     messagesByThread.get(key)!.push(m);
   }
 
-  const inputThreads: ExportInput['threads'] = threads.map((t) => {
+  const inputThreads: ExportInput['threads'] = [...threads]
+    .sort((a, b) => {
+      // Threads follow their anchor's document position (same preorder
+      // principle as the article); creation time breaks ties on one anchor.
+      const leafA = nodeById.get(String(a.anchor_node_id));
+      const leafB = nodeById.get(String(b.anchor_node_id));
+      const byDoc = compareOrdinalKeys(
+        leafA ? nodePreorderKey(leafA, nodeById) : [],
+        leafB ? nodePreorderKey(leafB, nodeById) : [],
+      );
+      if (byDoc !== 0) return byDoc;
+      const createdText = (v: unknown): string =>
+        v instanceof Date ? v.toISOString() : String(v ?? '');
+      const ca = createdText(a.created_at);
+      const cb = createdText(b.created_at);
+      if (ca !== cb) return ca < cb ? -1 : 1;
+      const ia = String(a.id ?? '');
+      const ib = String(b.id ?? '');
+      return ia < ib ? -1 : ia > ib ? 1 : 0;
+    })
+    .map((t) => {
     const tid = String(t.id);
     const leaf = nodeById.get(String(t.anchor_node_id));
     const sectionId = leaf && leaf.parent_id ? String(leaf.parent_id) : '';
+    const leafOrdinal = leaf && typeof leaf.ordinal === 'number' ? leaf.ordinal : 0;
     const tids = new Set((messagesByThread.get(tid) ?? []).map((m) => String(m.id)));
     const ev = evidence.filter((e) => tids.has(String(e.thread_message_id)));
     const evIds = new Set(ev.map((e) => String(e.id)));
@@ -142,6 +214,7 @@ export async function createReadingSessionExport(
       createdAt: t.created_at instanceof Date ? t.created_at.toISOString() : String(t.created_at ?? ''),
       anchorSelectedText: typeof t.anchor_text === 'string' ? t.anchor_text : '',
       anchorStructuralPath: typeof t.anchor_path === 'string' ? t.anchor_path : '',
+      anchorLeafOrdinal: leafOrdinal,
       sectionLabel: headingBySection.get(sectionId) ?? null,
       messages: (messagesByThread.get(tid) ?? []).map((m) => ({
         role: String(m.role),
@@ -171,7 +244,7 @@ export async function createReadingSessionExport(
       contentHash: typeof version.content_hash === 'string' ? version.content_hash : '',
       passageCount: typeof version.passage_count === 'number' ? version.passage_count : 0,
     },
-    nodes: nodes.map((n) => ({
+    nodes: sortNodesForExport(nodes).map((n) => ({
       node_type: String(n.node_type ?? ''),
       depth: typeof n.depth === 'number' ? n.depth : 0,
       structural_path: String(n.structural_path ?? ''),
