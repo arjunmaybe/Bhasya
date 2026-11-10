@@ -4,44 +4,105 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { browserReq } from '@/lib/api';
 
-/** Client Component: import form (browser fetch + navigation). */
+/** Client Component: URL validation, import feedback and navigation. */
 export function ImportForm() {
   const [url, setUrl] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const router = useRouter();
 
-  async function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (busy) return;
+
     setError('');
-    if (!url.trim()) return;
-    setBusy(true);
+
+    const candidate = url.trim();
+    if (!candidate) {
+      setError('Enter a page URL.');
+      return;
+    }
+
     try {
-      const r = (await browserReq('/api/sources/ingest', {
+      const parsed = new URL(candidate);
+      if (parsed.username || parsed.password) {
+        setError('Remove any username or password from the URL.');
+        return;
+      }
+
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        setError('Use a publicly accessible HTTP or HTTPS page.');
+        return;
+      }
+    } catch {
+      setError('Enter a complete URL, including https://.');
+      return;
+    }
+
+    setUrl(candidate);
+    setBusy(true);
+
+    try {
+      const result = (await browserReq('/api/sources/ingest', {
         method: 'POST',
-        body: JSON.stringify({ url: url.trim() }),
+        body: JSON.stringify({ url: candidate }),
       })) as { versionId: string };
-      router.push(`/read/${r.versionId}`);
-    } catch (e2) {
-      setError(e2 instanceof Error ? e2.message : 'import failed');
-    } finally {
+
+      if (typeof result?.versionId !== 'string' || !result.versionId.trim()) {
+        throw new Error('The import finished without a document version.');
+      }
+
+      router.push(`/read/${result.versionId}`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not import this page.');
       setBusy(false);
     }
   }
 
   return (
-    <form onSubmit={submit}>
+    <form className="import-form" onSubmit={submit} aria-busy={busy}>
       <div className="import-row">
+        <label className="visually-hidden" htmlFor="source-url">
+          Page URL
+        </label>
         <input
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          placeholder="Paste a book/document webpage URL…"
+          id="source-url"
+          className="import-url"
+          type="url"
           inputMode="url"
-          aria-label="Document URL"
+          autoComplete="url"
+          spellCheck={false}
+          required
+          disabled={busy}
+          value={url}
+          onChange={(event) => {
+            setUrl(event.target.value);
+            if (error) setError('');
+          }}
+          placeholder="https://example.com/article"
+          aria-invalid={error ? 'true' : undefined}
+          aria-describedby={error ? 'import-help import-error' : 'import-help'}
         />
-        <button className="btn" disabled={busy} type="submit">{busy ? 'Importing…' : 'Import'}</button>
+        <button className="btn import-submit" disabled={busy} type="submit">
+          {busy ? 'Importing…' : 'Import page'}
+        </button>
       </div>
-      {error ? <p className="error">{error}</p> : null}
+
+      <p className="import-help" id="import-help">
+        Public article and document pages work best.
+      </p>
+
+      {busy ? (
+        <p className="import-status" role="status" aria-live="polite">
+          Retrieving the page and preparing its passages.
+        </p>
+      ) : null}
+
+      {error ? (
+        <p className="error import-error" id="import-error" role="alert">
+          {error}
+        </p>
+      ) : null}
     </form>
   );
 }
