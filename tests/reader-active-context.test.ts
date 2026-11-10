@@ -98,7 +98,7 @@ describe('reader loading and calm editorial styling', () => {
   it('keeps the reading column comfortable and the document visible', () => {
     const c = css();
     expect(c).toMatch(/\.doc-inner/);
-    expect(c).toMatch(/max-width:\s*68ch/);
+    expect(c).toMatch(/max-width:\s*34rem/);
     expect(c).toMatch(/\.side\s*\{[^}]*max-height:\s*calc\(100vh/);
   });
 

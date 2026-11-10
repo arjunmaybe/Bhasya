@@ -50,8 +50,13 @@ describe('panel state: explicit compact/expanded, never inferred', () => {
 describe('panel layout: expanded workspace plus readable article', () => {
   it('3. expanded mode occupies approximately half the desktop workspace', () => {
     const c = css();
-    expect(c).toMatch(/\.reader-expanded\s*\{[^}]*clamp\(520px,\s*48vw,\s*720px\)/);
     expect(c).toMatch(/@media\s*\(min-width:\s*901px\)/);
+    // Desktop expansion hands the panel a wide track instead of keeping the
+    // compact sidebar width.
+    expect(c).toMatch(
+      /@media\s*\(min-width:\s*901px\)\s*\{[\s\S]*?\.reader-expanded\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*clamp\(520px,\s*48vw,\s*720px\)/,
+    );
+    expect(c).toMatch(/\.shell:has\(\.reader-expanded\)\s*\{\s*max-width:\s*1440px/);
   });
 
   it('compact mode is a restrained sidebar, not the old cramped width', () => {
@@ -63,7 +68,7 @@ describe('panel layout: expanded workspace plus readable article', () => {
   it('4. article remains readable in the remaining workspace', () => {
     const c = css();
     expect(c).toMatch(/\.doc-inner/);
-    expect(c).toMatch(/max-width:\s*68ch/);
+    expect(c).toMatch(/max-width:\s*34rem/);
   });
 
   it('expanded excerpt has room without becoming a tiny scroll box', () => {
