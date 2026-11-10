@@ -16,7 +16,9 @@ import type { DbClient } from './index.js';
 type AuthInstance = {
   handler: (request: Request) => Promise<Response>;
   api: {
-    getSession: (args: { headers: Headers }) => Promise<{ user: { id: string; email: string; name?: string | null } } | null>;
+    getSession: (args: { headers: Headers }) => Promise<{
+      user: { id: string; email: string; name?: string | null; emailVerified?: boolean };
+    } | null>;
   };
   options: unknown;
 };
@@ -49,6 +51,74 @@ function resolveSecret(env?: Record<string, unknown>): string {
 
 function resolveBaseURL(env?: Record<string, unknown>): string {
   return readBetterAuthEnv('BETTER_AUTH_URL', env) ?? 'http://localhost:8787';
+}
+
+/**
+ * Validate one explicit origin. Wildcards, credentials, paths, queries, and
+ * fragments are configuration errors — never silently ignored.
+ */
+function parseExplicitOrigin(raw: string, label: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`${label} must be an absolute http(s) origin`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`${label} must use http or https`);
+  }
+  if (url.username || url.password) throw new Error(`${label} must not include credentials`);
+  if (url.search || url.hash) throw new Error(`${label} must not include a query or fragment`);
+  if (url.pathname !== '/') throw new Error(`${label} must be an origin without a path`);
+  return url.origin;
+}
+
+/**
+ * Browser origin allowed to call Better Auth. Trusted origins are exactly the
+ * configured value plus Better Auth's own baseURL origin; request Host and
+ * forwarding headers are never consulted (see `trustedProxyHeaders` below).
+ * Unset means "contribute no extra origin" and keeps staging/tests working.
+ */
+function resolveWebOrigin(env?: Record<string, unknown>): string | null {
+  const raw = readBetterAuthEnv('BHASYA_WEB_ORIGIN', env)?.trim();
+  if (!raw) return null;
+  if (raw === '*') throw new Error('BHASYA_WEB_ORIGIN must be one explicit origin, not "*"');
+  const origin = parseExplicitOrigin(raw, 'BHASYA_WEB_ORIGIN');
+  if (resolveBaseURL(env).startsWith('https://') && !origin.startsWith('https://')) {
+    throw new Error('BHASYA_WEB_ORIGIN must use https when BETTER_AUTH_URL is https');
+  }
+  return origin;
+}
+
+function isLoopbackBaseURL(env?: Record<string, unknown>): boolean {
+  try {
+    const url = new URL(resolveBaseURL(env));
+    const host = url.hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host.endsWith('.localhost');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Public sign-up policy.
+ *
+ * - An explicit `BHASYA_DISABLE_SIGNUP=1` always wins and cannot be overridden.
+ * - Sign-up is enabled only under Vitest or an explicitly configured local
+ *   Worker smoke test (`BHASYA_TEST_SIGNUP=1` and a loopback BETTER_AUTH_URL).
+ * - Every authenticated staging/production deployment is closed by default.
+ *
+ * Account provisioning is an operator action (wrangler secret/DB access), not
+ * a public registration flow. See AGENTS.md security rules.
+ */
+function resolveDisableSignUp(env?: Record<string, unknown>): boolean {
+  if (readBetterAuthEnv('BHASYA_DISABLE_SIGNUP', env) === '1') return true;
+  const nodeEnv = readBetterAuthEnv('NODE_ENV', env);
+  const vitest = readBetterAuthEnv('VITEST', env);
+  const testLike = nodeEnv === 'test' || (nodeEnv === undefined && (vitest === 'true' || vitest === '1'));
+  if (testLike) return false;
+  const localSmoke = readBetterAuthEnv('BHASYA_TEST_SIGNUP', env) === '1' && isLoopbackBaseURL(env);
+  return !localSmoke;
 }
 
 async function getKyselyForDb(db: DbClient): Promise<unknown> {
@@ -104,14 +174,24 @@ async function createAuthInstance(
   // Cloudflare Worker entry importable (no static `better-auth/*` imports).
   const { bearer } = await import('better-auth/plugins');
   const kysely = await getKyselyForDb(db);
+  const webOrigin = resolveWebOrigin(opts.env);
+  const disableSignUp = resolveDisableSignUp(opts.env);
   const auth = (betterAuth as (o: unknown) => AuthInstance)({
     baseURL: resolveBaseURL(opts.env),
     secret: resolveSecret(opts.env),
-    emailAndPassword: { enabled: true, requireEmailVerification: false, autoSignIn: true },
+    // Only explicit origins: Better Auth's baseURL origin (added by the
+    // library) plus the configured web origin. No wildcard, no function that
+    // reads Host / x-forwarded-* from the request.
+    trustedOrigins: webOrigin ? [webOrigin] : [],
+    emailAndPassword: { enabled: true, requireEmailVerification: false, autoSignIn: true, disableSignUp },
     session: { expiresIn: 60 * 60 * 24 * 7, updateAge: 60 * 60 * 24 },
-    database: { db: kysely, type: 'postgres' },
+    database: { db: kysely, type: 'postgres', transaction: true },
     plugins: [(bearer as () => unknown)()],
-    advanced: { database: { validateSchema: opts.validateSchema ?? true } },
+    advanced: {
+      database: { validateSchema: opts.validateSchema ?? true },
+      // Trust is configured, never inferred from proxy headers.
+      trustedProxyHeaders: false,
+    },
   });
   return auth;
 }

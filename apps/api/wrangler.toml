@@ -41,6 +41,12 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 BHASYA_USE_AUTH = "1"
 BETTER_AUTH_URL = "https://bhasya-api.devmesh-8143.workers.dev"
+# Public sign-up stays closed in every authenticated deployment (the library
+# also defaults to closed; an explicit disable can never be overridden).
+BHASYA_DISABLE_SIGNUP = "1"
+# Browser origin allowed to call Better Auth. Set per deployment; it must be a
+# single explicit https origin (no wildcard, no headers-derived trust).
+# BHASYA_WEB_ORIGIN = "https://<web-origin>"
 BHASYA_MODEL_ID = "dev-grounded-1"
 BHASYA_MODEL_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 SUPABASE_URL = "https://ylolimxijkwoiwbhkexn.supabase.co"
@@ -54,12 +60,18 @@ SUPABASE_STORAGE_BUCKET = "bhasya-artifacts"
 # Isolated here so the DEFAULT ($0 staging) deploy never requires an R2
 # bucket binding, R2 billing, or Hyperdrive. Nothing here is read by the
 # default `wrangler deploy` / `--dry-run` without `--env production`.
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "f6b05c0312f24277a43e61930042da9f"
+
 [env.production]
 # Wrangler does not inherit top-level `vars` into environments, so the
 # baseline vars are repeated here for the production profile.
 [env.production.vars]
 BHASYA_USE_AUTH = "1"
 BETTER_AUTH_URL = "https://api.bhasya.example"
+BHASYA_DISABLE_SIGNUP = "1"
+# BHASYA_WEB_ORIGIN = "https://<web-origin>"
 BHASYA_MODEL_ID = "dev-grounded-1"
 BHASYA_MODEL_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 SUPABASE_STORAGE_BUCKET = "bhasya-artifacts"
