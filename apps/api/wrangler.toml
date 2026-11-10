@@ -60,9 +60,6 @@ SUPABASE_STORAGE_BUCKET = "bhasya-artifacts"
 # Isolated here so the DEFAULT ($0 staging) deploy never requires an R2
 # bucket binding, R2 billing, or Hyperdrive. Nothing here is read by the
 # default `wrangler deploy` / `--dry-run` without `--env production`.
-[[hyperdrive]]
-binding = "HYPERDRIVE"
-id = "f6b05c0312f24277a43e61930042da9f"
 
 [env.production]
 # Wrangler does not inherit top-level `vars` into environments, so the
