@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
-import { browserApiBase, browserReq } from '@/lib/api';
+import { ApiError, browserReq } from '@/lib/api';
 import {
   createStreamLane,
   laneBegin,
@@ -22,6 +22,7 @@ import {
   findSelectionRange,
   type TextRange,
 } from '@/lib/highlight-render';
+import { isNarrowReader } from '@/lib/reader-viewport';
 
 interface NodeDto { id: string; parent_id: string | null; node_type: string; structural_path: string; text: string }
 interface PassageDto { id: string; node_id: string; structural_path: string; text: string }
@@ -39,6 +40,50 @@ interface EvidenceDto { id: string; thread_message_id: string; passage_id: strin
  * ONLY to place the Explain popover (never persisted as the anchor).
  */
 interface PendingSel { text: string; passageId: string | null; anchorX: number; anchorY: number }
+
+/**
+ * Programmatic reader navigation must honour the OS reduced-motion setting:
+ * animated scrolling is decorative, never required to understand the move.
+ */
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+/**
+ * Panel-level error text. Session expiry is an explicit state the reader can
+ * act on; everything else keeps the API's own message.
+ */
+function requestErrorMessage(cause: unknown, fallback: string): string {
+  if (cause instanceof ApiError && cause.status === 401) {
+    return 'Your session has ended. Reload the page to sign in again.';
+  }
+  return cause instanceof Error ? cause.message : fallback;
+}
+
+/**
+ * Persisted highlights are buttons inside the reading flow. Enter activates
+ * on keydown (once, even while held); Space prevents scrolling on keydown and
+ * activates on keyup, matching native button behaviour. Both paths call the
+ * mark's click so the existing delegated passage handler remains the single
+ * source of thread/passage resolution.
+ */
+function onHighlightKeyDown(e: ReactKeyboardEvent<HTMLElement>) {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    if (e.repeat) return;
+    e.currentTarget.click();
+  } else if (e.key === ' ') {
+    e.preventDefault();
+  }
+}
+
+function onHighlightKeyUp(e: ReactKeyboardEvent<HTMLElement>) {
+  if (e.key === ' ') {
+    e.currentTarget.click();
+  }
+}
 
 /**
  * Render passage text with EVERY persisted highlight slice wrapped in <mark>.
@@ -66,7 +111,17 @@ function MarkedPassageText({
       {segs.map((s, i) => {
         const slice = text.slice(s.start, s.end);
         if (s.flash) return <mark key={i} className="cite-flash" data-cite-flash="1">{slice}</mark>;
-        if (s.marked) return <mark key={i} className="hl" data-hl="1">{slice}</mark>;
+        if (s.marked) return (
+          <mark
+            key={i}
+            className="hl"
+            data-hl="1"
+            role="button"
+            tabIndex={0}
+            onKeyDown={onHighlightKeyDown}
+            onKeyUp={onHighlightKeyUp}
+          >{slice}</mark>
+        );
         return <Fragment key={i}>{slice}</Fragment>;
       })}
     </>
@@ -278,6 +333,9 @@ export function ReaderClient(props: {
   const followupLane = useRef<StreamLane>(createStreamLane());
   const openThreadRef = useRef<string | null>(null);
   const docRef = useRef<HTMLDivElement>(null);
+  // The thread/highlights panel. On narrow viewports it is stacked after the
+  // whole document, so opening a thread has to reveal the panel itself.
+  const asideRef = useRef<HTMLElement>(null);
   // Dedicated ref to the thread conversation scroll container. Follow-up
   // navigation scrolls THIS element only, never the whole page.
   const threadScrollRef = useRef<HTMLDivElement>(null);
@@ -423,13 +481,12 @@ export function ReaderClient(props: {
 
   // reading_session_started / ended at the semantic points.
   useEffect(() => {
-    const base = browserApiBase();
-    fetch(`${base}/api/reading-sessions/start`, {
+    fetch('/api/reading-sessions/start', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ documentVersionId: versionId }),
     }).catch(() => {});
     return () => {
-      fetch(`${base}/api/reading-sessions/end`, {
+      fetch('/api/reading-sessions/end', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ documentVersionId: versionId }),
       }).catch(() => {});
@@ -448,11 +505,25 @@ export function ReaderClient(props: {
     clearFlash();
     const el = docRef.current?.querySelector(`[data-passage-id="${passageId}"]`);
     if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block });
+      if (prefersReducedMotion()) el.scrollIntoView({ block });
+      else el.scrollIntoView({ behavior: 'smooth', block });
       el.classList.add('flash');
       setTimeout(() => el.classList.remove('flash'), 1700);
     }
   }, [clearFlash]);
+
+  // Narrow viewports stack the panel below the whole document. When a thread
+  // becomes the active workspace there, moving the viewport to the passage
+  // would leave the answer off-screen; reveal the panel instead. Desktop
+  // keeps its sticky sidebar, where the panel is already visible — this is a
+  // no-op there so passage navigation is unchanged.
+  const revealThreadPanel = useCallback(() => {
+    if (!isNarrowReader(window.innerWidth)) return;
+    const el = asideRef.current;
+    if (!el) return;
+    if (prefersReducedMotion()) el.scrollIntoView({ block: 'start' });
+    else el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
 
   // Intentional article interaction collapses expanded -> compact WITHOUT
   // touching thread state (thread, passage, messages, citations all stay).
@@ -564,7 +635,11 @@ export function ReaderClient(props: {
     const passageEl = docRef.current?.querySelector(`[data-passage-id="${passageId}"]`);
     if (!passageEl) return;
     pendingExplainRef.current = null;
-    scrollToPassage(passageId, 'start');
+    // Narrow viewports were taken to the panel when the request started, so
+    // completion must not scroll again (a reader may already be inside the
+    // answer) and must never jump back up to the passage. Desktop keeps its
+    // one-shot passage navigation.
+    if (!isNarrowReader(window.innerWidth)) scrollToPassage(passageId, 'start');
   }, [messages, highlights, openThreadId, activePassageId]);
 
   // Return keyboard focus to the composer after a follow-up round-trips,
@@ -657,13 +732,13 @@ export function ReaderClient(props: {
         method: 'POST',
       })) as { exportId: string };
       const a = document.createElement('a');
-      a.href = `${browserApiBase()}/api/exports/${out.exportId}`;
+      a.href = `/api/exports/${out.exportId}`;
       a.setAttribute('download', '');
       document.body.appendChild(a);
       a.click();
       a.remove();
     } catch (e) {
-      setExportError(e instanceof Error ? e.message : 'export failed');
+      setExportError(requestErrorMessage(e, 'export failed'));
     } finally {
       setExporting(false);
     }
@@ -713,10 +788,14 @@ export function ReaderClient(props: {
       setPanelMode('expanded');
       if (anchorSelectedText) setThreadSel(anchorSelectedText);
       else if (hl?.selected_text) setThreadSel(hl.selected_text);
-      // Reopening returns to its passage context.
-      if (contextPassageId) scrollToPassage(contextPassageId);
+      // Reopening returns to its passage context on desktop, where the panel
+      // is already pinned beside the document. On narrow viewports the panel
+      // is below the whole document, so revealing the thread the user just
+      // opened is the only navigation that can show it.
+      if (isNarrowReader(window.innerWidth)) revealThreadPanel();
+      else if (contextPassageId) scrollToPassage(contextPassageId);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'could not reopen thread');
+      setError(requestErrorMessage(e, 'could not reopen thread'));
     }
   }
 
@@ -726,6 +805,10 @@ export function ReaderClient(props: {
     const selectedPassageId = pending.passageId;
     setBusy(true);
     setError('');
+    // Narrow viewports: the loading card, the streamed answer, and the final
+    // thread all live in the panel below the document, so bring it into view
+    // as the request starts. No-op on desktop, where the side panel is visible.
+    revealThreadPanel();
     // Shared completion: identical thread state whether the answer streamed
     // progressively or arrived via the complete/wait fallback.
     const finishExplain = async (anchor: { anchorId: string; passageId: string }, threadId: string) => {
@@ -787,7 +870,7 @@ export function ReaderClient(props: {
       try {
         setStreaming(true);
         setStreamText('');
-        const res = await fetch(`${browserApiBase()}/api/threads/explain/stream`, {
+        const res = await fetch('/api/threads/explain/stream', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ anchorId: anchor.anchorId }),
@@ -834,7 +917,7 @@ export function ReaderClient(props: {
     } catch (e) {
       // No real thread exists here: never leave a misleading scroll target.
       pendingExplainRef.current = null;
-      setError(e instanceof Error ? e.message : 'explanation failed');
+      setError(requestErrorMessage(e, 'explanation failed'));
     } finally {
       setBusy(false);
     }
@@ -871,7 +954,7 @@ export function ReaderClient(props: {
       }
       browserReq(`/api/citations/${citeId}/clicked`, { method: 'POST' }).catch(() => {});
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'citation did not resolve');
+      setError(requestErrorMessage(e, 'citation did not resolve'));
     }
   }
 
@@ -914,7 +997,7 @@ export function ReaderClient(props: {
       try {
         setStreaming(true);
         setStreamText('');
-        const res = await fetch(`${browserApiBase()}/api/threads/${threadId}/messages/stream`, {
+        const res = await fetch(`/api/threads/${threadId}/messages/stream`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ content }),
@@ -955,7 +1038,7 @@ export function ReaderClient(props: {
     } catch (e2) {
       pendingQuestionRef.current = null;
       focusAfterSendRef.current = false;
-      setError(e2 instanceof Error ? e2.message : 'message failed');
+      setError(requestErrorMessage(e2, 'message failed'));
     } finally {
       setBusy(false);
     }
@@ -1140,7 +1223,7 @@ export function ReaderClient(props: {
               })}
             </section>
           ))}
-          {pending ? (
+          {pending && !busy ? (
             <ExplainPopover
               anchorX={pending.anchorX}
               anchorY={pending.anchorY}
@@ -1152,6 +1235,7 @@ export function ReaderClient(props: {
       </article>
 
       <aside
+        ref={asideRef}
         className={threadHeight != null ? 'side side-thread-resized' : 'side'}
         data-thread-resized={threadHeight != null ? 'true' : 'false'}
         aria-label="Passage threads and highlights"
@@ -1298,7 +1382,7 @@ export function ReaderClient(props: {
         ) : (
           <div className="thread-card">
             <div className="meta">No thread open</div>
-            <p style={{ fontSize: 14 }}>Select any sentence in the document — <b>Explain</b> appears near your selection. The explanation stays attached to that exact passage.</p>
+            <p className="thread-empty">Select any sentence in the document — <b>Explain</b> appears near your selection. The explanation stays attached to that exact passage.</p>
             {activePassage && threadSel ? (
               <div className="thread-context">
                 <div className="sel">“{threadSel.slice(0, 280)}”</div>
