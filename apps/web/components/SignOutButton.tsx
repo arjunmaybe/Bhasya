@@ -14,7 +14,10 @@ export function SignOutButton() {
     setPending(true);
     setFailed(false);
     try {
-      await browserReq('/api/auth/sign-out', { method: 'POST' });
+      await browserReq('/api/auth/sign-out', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
       router.replace('/');
       router.refresh();
     } catch {

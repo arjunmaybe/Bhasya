@@ -37,6 +37,14 @@ describe('web authentication surface', () => {
     expect(signUpCalls).toEqual([]);
   });
 
+  it('sends an explicit JSON body with browser sign-out', () => {
+    const signOut = read(join(root, 'apps/web/components/SignOutButton.tsx'));
+
+    expect(signOut).toMatch(
+      /browserReq\('\/api\/auth\/sign-out',\s*\{\s*method: 'POST',\s*body: JSON\.stringify\(\{\}\),\s*\}\)/,
+    );
+  });
+
   it('uses only Better Auth sign-in, sign-out, and session endpoints', () => {
     const endpoints = new Set<string>();
     for (const file of webFiles) {
