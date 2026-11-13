@@ -14,7 +14,8 @@ export const metadata: Metadata = {
  * Server Component: renders the document (SEO/server-rendered).
  * Selection, highlights, thread UI live in <ReaderClient />.
  */
-export default async function ReadPage({ params }: { params: { versionId: string } }) {
+export default async function ReadPage({ params }: { params: Promise<{ versionId: string }> }) {
+  const { versionId } = await params;
   let version: any;
   let nodes: Array<{ id: string; parent_id: string | null; node_type: string; structural_path: string; text: string }> = [];
   let passages: Array<{ id: string; node_id: string; structural_path: string; text: string }> = [];
@@ -24,9 +25,9 @@ export default async function ReadPage({ params }: { params: { versionId: string
   }> = [];
   try {
     const [v, tree, hl] = await Promise.all([
-      api.getVersion(params.versionId),
-      api.getTree(params.versionId),
-      api.getHighlights(params.versionId),
+      api.getVersion(versionId),
+      api.getTree(versionId),
+      api.getHighlights(versionId),
     ]);
     version = v.version;
     nodes = tree.nodes;
@@ -36,7 +37,7 @@ export default async function ReadPage({ params }: { params: { versionId: string
     if (error instanceof ApiError && error.status === 401) {
       return (
         <AuthRequired
-          next={`/read/${encodeURIComponent(params.versionId)}`}
+          next={`/read/${encodeURIComponent(versionId)}`}
           surface="reader"
         />
       );
@@ -49,7 +50,7 @@ export default async function ReadPage({ params }: { params: { versionId: string
 
   return (
     <ReaderClient
-      versionId={params.versionId}
+      versionId={versionId}
       title={String(version.title ?? 'Untitled')}
       sourceUrl={String(version.source_url ?? version.fetched_url ?? '')}
       nodes={nodes}

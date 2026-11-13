@@ -62,7 +62,8 @@ describe('same-origin API proxy contract', () => {
 
     const server = serverApi();
     expect(server).toMatch(/from 'next\/headers'/);
-    expect(server).toMatch(/headers\(\)\.get\('cookie'\)/);
+    expect(server).toMatch(/await headers\(\)/);
+    expect(server).toMatch(/requestHeaders\.get\('cookie'\)/);
     expect(server).toMatch(/BHASYA_API_URL|resolveApiOrigin/);
   });
 

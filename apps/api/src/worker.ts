@@ -12,30 +12,31 @@ import { getServices } from './services.js';
  * local-development only and is not a production backend). No alternative
  * runtime, no contract changes here.
  *
- * Worker bindings required (wrangler secrets/vars — never committed):
- * - DATABASE_URL ......... Supabase PostgreSQL/pgvector ($0 staging secret;
- *   Hyperdrive optional, production profile only)
- * - BHASYA_MODEL_API_KEY / BHASYA_MODEL_ID / BHASYA_MODEL_ENDPOINT (real AI)
- * - BHASYA_USE_AUTH=1 + Better Auth secrets (production session lifecycle;
- *   the Hono boundary resolves the session via getIdentityForRequest)
- * - $0 staging storage (no R2 billing): Supabase Storage behind the same
- *   StoragePort via SUPABASE_URL + SUPABASE_SERVICE_KEY (+ optional
- *   SUPABASE_STORAGE_BUCKET, default `bhasya-artifacts`, private bucket).
- * - Optional future production storage: R2 bucket binding
- *   (e.g. BHASYA_BUCKET, `[env.production]` only). R2 wins when present;
- *   default $0 staging needs no R2 binding and fails closed only when
- *   neither Supabase env nor R2 binding is configured (LocalStorageAdapter
- *   is local-dev only and has no filesystem on Workers).
+ * Worker bindings (Wrangler bindings/vars/secrets; never commit credentials):
+ * - HYPERDRIVE: staging PostgreSQL binding. services.ts prefers its
+ *   connectionString over DATABASE_URL when the binding is present.
+ * - DATABASE_URL: fallback for local development or environments without
+ *   HYPERDRIVE; it is not the deployed staging database transport.
+ * - SUPABASE_URL + SUPABASE_SERVICE_KEY, with optional
+ *   SUPABASE_STORAGE_BUCKET (default `bhasya-artifacts`): private artifact
+ *   storage through StoragePort; staging does not require an R2 binding.
+ * - BETTER_AUTH_SECRET, BETTER_AUTH_URL, BHASYA_USE_AUTH=1,
+ *   BHASYA_WEB_ORIGIN, and BHASYA_DISABLE_SIGNUP=1: staging auth settings;
+ *   public sign-up remains disabled.
+ * - BHASYA_MODEL_ID / BHASYA_MODEL_ENDPOINT and, for a hosted provider,
+ *   BHASYA_MODEL_API_KEY: model provider configuration.
+ * - R2 is reserved for the separate optional production profile.
  *
  * Deployment wiring (wrangler.toml + secrets) is an ops step with real
  * bindings; it is intentionally not simulated with dev adapters here.
  *
-  * Runtime notes:
-  * - No `node:*` imports on this path: hashing uses pure-JS SHA-256 +
-  *   Web Crypto, IDs use `crypto.randomUUID()`, storage is Supabase Storage
-  *   ($0 baseline) or R2 (optional future) behind StoragePort, DB is
-  *   PostgreSQL via DATABASE_URL. PGlite/filesystem adapters are never
-  *   constructed here.
+ * Runtime notes:
+ * - No `node:*` imports on this path: hashing uses pure-JS SHA-256 +
+ *   Web Crypto, IDs use `crypto.randomUUID()`, storage is Supabase Storage
+ *   ($0 baseline) or R2 (optional future) behind StoragePort; DB uses
+ *   HYPERDRIVE when bound (staging), with DATABASE_URL as fallback.
+ *   PGlite/filesystem adapters are never constructed here.
+ *
  * - Production never seeds the dev user (see getServices: BHASYA_USE_AUTH=1
  *   skips seedDev). Identity is server-derived from the Better Auth session.
  */

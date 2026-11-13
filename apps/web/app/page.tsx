@@ -21,9 +21,9 @@ type Source = {
 export default async function Home({
   searchParams,
 }: {
-  searchParams?: { q?: string | string[] };
+  searchParams: Promise<{ q?: string | string[] }>;
 }) {
-  const rawQuery = searchParams?.q;
+  const { q: rawQuery } = await searchParams;
   const query = typeof rawQuery === 'string' ? rawQuery.trim().slice(0, 100) : '';
 
   let sources: Source[] = [];

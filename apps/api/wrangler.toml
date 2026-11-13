@@ -4,11 +4,13 @@
 #   → Supabase Storage behind StoragePort ($0 baseline, private bucket
 #     `bhasya-artifacts`). No Node production server. No R2 billing.
 #
-# Default deploy (no --env flag) IS $0 staging and must NOT require an R2
-# bucket binding, R2 billing, or Hyperdrive. Staging storage is selected in
-# code (apps/api/src/services.ts): R2 binding present → R2, else
-# SUPABASE_URL + SUPABASE_SERVICE_KEY → Supabase, else fail closed (prod) /
-# filesystem (local dev). The app sees only StoragePort put/get.
+# Default deploy (no --env flag) IS $0 staging. It uses the existing
+# HYPERDRIVE binding `bhasya-staging-verified` for Supabase PostgreSQL and
+# Supabase Storage for private artifacts. No R2 bucket binding or R2 billing
+# is required. Storage is selected in code (apps/api/src/services.ts):
+# R2 binding present → R2, else SUPABASE_URL + SUPABASE_SERVICE_KEY →
+# Supabase, else fail closed (prod) / filesystem (local dev).
+# The app sees only StoragePort put/get.
 #
 # Usage (no account needed for local verification):
 #   cp .dev.vars.example .dev.vars   # fill local values, never commit
@@ -44,6 +46,7 @@ BETTER_AUTH_URL = "https://bhasya-api.devmesh-8143.workers.dev"
 # Public sign-up stays closed in every authenticated deployment (the library
 # also defaults to closed; an explicit disable can never be overridden).
 BHASYA_DISABLE_SIGNUP = "1"
+BHASYA_WEB_ORIGIN = "https://bhasya-web.devmesh-8143.workers.dev"
 # Browser origin allowed to call Better Auth. Set per deployment; it must be a
 # single explicit https origin (no wildcard, no headers-derived trust).
 # BHASYA_WEB_ORIGIN = "https://<web-origin>"
@@ -52,14 +55,17 @@ BHASYA_MODEL_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 SUPABASE_URL = "https://ylolimxijkwoiwbhkexn.supabase.co"
 SUPABASE_STORAGE_BUCKET = "bhasya-artifacts"
 
-# Staging database transport: direct DATABASE_URL → Supabase PostgreSQL
-# (rolled back from Hyperdrive on 2026-09-30 after bounded verification showed
-# fast 500s/timeouts on DB-backed reads; Hyperdrive config retained in the
-# account for diagnosis, NOT bound here). Production profile below untouched.
-# Optional future production profile ONLY (Cloudflare R2 + Hyperdrive).
+# Staging database transport uses the existing Hyperdrive configuration
+# `bhasya-staging-verified` for Supabase PostgreSQL. Supabase Storage remains
+# the $0 file-storage baseline; no R2 binding is needed for staging.
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "f6b05c0312f24277a43e61930042da9f"
+
+# Optional future production profile ONLY (Cloudflare R2 + separate Hyperdrive).
 # Isolated here so the DEFAULT ($0 staging) deploy never requires an R2
-# bucket binding, R2 billing, or Hyperdrive. Nothing here is read by the
-# default `wrangler deploy` / `--dry-run` without `--env production`.
+# bucket binding or R2 billing. Nothing here is read by the default
+# `wrangler deploy` / `--dry-run` without `--env production`.
 
 [env.production]
 # Wrangler does not inherit top-level `vars` into environments, so the
