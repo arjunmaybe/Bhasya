@@ -314,14 +314,15 @@ describe('minimum-height boundary (handle never clipped at the smallest size)', 
     const mobileHandleBlock = Number(handleMargin![1]) + Number(mobileHandle![1]) + Number(handleMargin![3]);
     // Live-measured content heights (headless Chrome 154, production CSS +
     // thread-card DOM, 520px sidebar): 1-line excerpt head 100px, 2-line
-    // excerpt head 123px, footer 109px. Fit boundary measured at 308px
-    // (desktop, 2-line) and ~316px (narrow handle); 240px clipped the handle
-    // by ~68px with elementFromPoint missing it.
+    // excerpt head 123px, footer 109px. Fit boundary measured at 310px
+    // (desktop, 2-line, 24px accessibility target) and ~316px (narrow
+    // handle); 240px clipped the handle by ~68px with elementFromPoint
+    // missing it.
     const HEAD_2LINE = 123;
     const FOOT = 109;
     const desktopNeed = cardChrome + HEAD_2LINE + scrollFloor + FOOT + handleBlock;
     const mobileNeed = cardChrome + HEAD_2LINE + scrollFloor + FOOT + mobileHandleBlock;
-    expect(desktopNeed).toBe(308);
+    expect(desktopNeed).toBe(310);
     expect(mobileNeed).toBe(316);
     // The minimum fits both breakpoints with room for subpixel/font variance,
     // so the scroll region (not the handle) absorbs the last shrinking.

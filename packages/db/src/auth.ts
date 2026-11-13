@@ -156,9 +156,25 @@ async function resolveWorkspaceForUser(db: DbClient, userId: string): Promise<st
   return wsId;
 }
 
-/** Link the canonical app user to the Better Auth user (by id, else email). */
+/**
+ * Link the canonical app user to the Better Auth user: by the stored
+ * `external_user_id` first, else by email — but only for a VERIFIED email and
+ * only onto a row that is not linked to anyone else.
+ *
+ * Unverified email adoption is a takeover vector: anyone who signs up with an
+ * existing app user's email would inherit that user's workspace. Registration
+ * is closed outside test environments, so this branch stays dormant; the
+ * guard keeps it closed even if a verified-email path is added later.
+ *
+ * Adoption is a compare-and-swap: `UPDATE … WHERE external_user_id IS NULL`
+ * is the only writer, so an app user already linked to a different Better
+ * Auth identity is never re-pointed. If the update touches no row, the row is
+ * accepted only when it is already linked to *this* identity (idempotent
+ * retry / concurrent first request). Every other outcome, including a failed
+ * update, fails closed instead of granting access to an unproven row.
+ */
 async function findOrCreateAppUser(
-  db: DbClient, betterUserId: string, email: string, name?: string | null,
+  db: DbClient, betterUserId: string, email: string, name: string | null | undefined, emailVerified: boolean,
 ): Promise<{ userId: string; email: string } | null> {
   const cleanEmail = email.trim().toLowerCase();
   try {
@@ -172,10 +188,38 @@ async function findOrCreateAppUser(
       `SELECT id, email FROM users WHERE email = $1 LIMIT 1`, [cleanEmail],
     )).rows[0] as { id?: unknown; email?: unknown } | undefined;
     if (byEmail?.id) {
+      // Never adopt an existing app user from an unverified address.
+      if (!emailVerified) return null;
+      const appUserId = String(byEmail.id);
       try {
-        await db.query(`UPDATE users SET external_user_id = $1 WHERE id = $2`, [betterUserId, String(byEmail.id)]);
-      } catch { /* column missing on very old DB; identity still resolves by email row */ }
-      return { userId: String(byEmail.id), email: String(byEmail.email ?? cleanEmail) };
+        const updated = (await db.query(
+          `UPDATE users SET external_user_id = $1
+            WHERE id = $2 AND external_user_id IS NULL
+            RETURNING id, email`,
+          [betterUserId, appUserId],
+        )).rows[0] as { id?: unknown; email?: unknown } | undefined;
+        if (updated?.id) {
+          return { userId: String(updated.id), email: String(updated.email ?? cleanEmail) };
+        }
+        // No row updated: the row is already linked. That is only acceptable
+        // when it points at this Better Auth identity — otherwise fail closed.
+        const existing = (await db.query(
+          `SELECT id, email, external_user_id FROM users WHERE id = $1 LIMIT 1`, [appUserId],
+        )).rows[0] as
+          | { id?: unknown; email?: unknown; external_user_id?: unknown }
+          | undefined;
+        if (
+          existing?.id &&
+          typeof existing.external_user_id === 'string' &&
+          existing.external_user_id === betterUserId
+        ) {
+          return { userId: String(existing.id), email: String(existing.email ?? cleanEmail) };
+        }
+        return null;
+      } catch {
+        // A link we could not prove is a link we do not use.
+        return null;
+      }
     }
   }
   const displayName = (name ?? '').trim() || cleanEmail || 'User';
@@ -208,16 +252,26 @@ export async function getIdentityForRequest(
   // input — the signature deliberately has no URL/query argument, so `?user=`-
   // style selectors cannot influence identity. Arbitrary headers (`x-dev-user`,
   // `x-user-id`, …) are not read here and therefore do nothing.
-  let session: { user: { id: string; email: string; name?: string | null } } | null;
+  let session: {
+    user: { id: string; email: string; name?: string | null; emailVerified?: boolean };
+  } | null;
   try {
     const auth = await getAuthForDb(db, { env: opts.env });
     session = await auth.api.getSession({ headers });
   } catch {
     return null;
   }
-  const u = (session as unknown as { user?: { id?: unknown; email?: unknown; name?: unknown } } | null)?.user;
+  const u = (session as unknown as {
+    user?: { id?: unknown; email?: unknown; name?: unknown; emailVerified?: unknown };
+  } | null)?.user;
   if (!u || typeof u.id !== 'string' || !u.id) return null;
-  const appUser = await findOrCreateAppUser(db, u.id, typeof u.email === 'string' ? u.email : '', typeof u.name === 'string' ? u.name : null);
+  const appUser = await findOrCreateAppUser(
+    db,
+    u.id,
+    typeof u.email === 'string' ? u.email : '',
+    typeof u.name === 'string' ? u.name : null,
+    u.emailVerified === true,
+  );
   if (!appUser) return null;
   const workspaceId = await resolveWorkspaceForUser(db, appUser.userId);
   if (!workspaceId) return null;

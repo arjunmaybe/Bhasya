@@ -1,6 +1,14 @@
+import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { api } from '@/lib/api';
+import { api } from '@/lib/api.server';
+import { ApiError } from '@/lib/api';
+import { AuthRequired } from '@/components/AuthRequired';
 import { ReaderClient } from '@/components/ReaderClient';
+
+/** Private, per-user reading surface: never indexed. */
+export const metadata: Metadata = {
+  robots: { index: false, follow: false },
+};
 
 /**
  * Server Component: renders the document (SEO/server-rendered).
@@ -24,7 +32,15 @@ export default async function ReadPage({ params }: { params: { versionId: string
     nodes = tree.nodes;
     passages = tree.passages;
     highlights = hl.highlights;
-  } catch {
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      return (
+        <AuthRequired
+          next={`/read/${encodeURIComponent(params.versionId)}`}
+          surface="reader"
+        />
+      );
+    }
     notFound();
   }
 

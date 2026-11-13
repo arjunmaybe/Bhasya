@@ -116,7 +116,7 @@ export default {
       const msg = e instanceof Error ? e.message : 'service init failed';
       return Response.json({ error: msg }, { status: 500 });
     }
-    return app.fetch(request);
+    return app.fetch(request, env);
   },
 };
 
