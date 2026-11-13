@@ -12,6 +12,12 @@ import {
   type StreamLane,
 } from '@/lib/stream-lane';
 import {
+  beginThreadRequest,
+  cancelThreadRequest,
+  createThreadRequestGate,
+  isCurrentThreadRequest,
+} from '@/lib/thread-request';
+import {
   EXPLAIN_FALLBACK_SIZE,
   clampExplainPosition,
   citationTargetPassageId,
@@ -332,6 +338,10 @@ export function ReaderClient(props: {
   const explainLane = useRef<StreamLane>(createStreamLane());
   const followupLane = useRef<StreamLane>(createStreamLane());
   const openThreadRef = useRef<string | null>(null);
+  // Ownership token for thread-detail requests. Only the newest openThread may
+  // write thread state, so an older response can never overwrite a newer
+  // thread or reopen a closed one.
+  const threadRequests = useRef(createThreadRequestGate());
   const docRef = useRef<HTMLDivElement>(null);
   // The thread/highlights panel. On narrow viewports it is stacked after the
   // whole document, so opening a thread has to reveal the panel itself.
@@ -462,6 +472,9 @@ export function ReaderClient(props: {
   useEffect(() => () => {
     laneCancel(explainLane.current);
     laneCancel(followupLane.current);
+    // An in-flight thread-detail request must not write state, expand the
+    // panel, or scroll on a discarded component.
+    cancelThreadRequest(threadRequests.current);
   }, []);
 
   // Edge-trimmed preview of the in-flight assistant text. Same normalization
@@ -707,6 +720,9 @@ export function ReaderClient(props: {
     // a late completion can never repopulate cleared state.
     laneCancel(explainLane.current);
     laneCancel(followupLane.current);
+    // A thread-detail request in flight also belongs to the closing thread:
+    // invalidate it so a late response can never reopen cleared state.
+    cancelThreadRequest(threadRequests.current);
     pendingExplainRef.current = null;
     setStreamText('');
     setStreaming(false);
@@ -768,6 +784,9 @@ export function ReaderClient(props: {
   }, []);
 
   async function openThread(threadId: string, anchorSelectedText?: string) {
+    // Claim this request synchronously, before context state or the await, so
+    // any older in-flight thread-detail request is stale from here on.
+    const requestToken = beginThreadRequest(threadRequests.current);
     setError('');
     // Resolve passage context from the persisted highlight before fetching so
     // the panel is keyed correctly even before messages arrive.
@@ -782,6 +801,9 @@ export function ReaderClient(props: {
       const r = (await browserReq(`/api/threads/${threadId}`)) as {
         thread: { id: string }; messages: Msg[]; citations: Cite[]; evidence: EvidenceDto[];
       };
+      // Stale response: a newer open, a close, or unmount won. Apply nothing —
+      // not the thread, not the messages, not the panel mode, not the scroll.
+      if (!isCurrentThreadRequest(threadRequests.current, requestToken)) return;
       setOpenThreadId(threadId);
       applyThreadDetail(r);
       // Explicitly entering a thread makes it the active workspace.
@@ -795,6 +817,9 @@ export function ReaderClient(props: {
       if (isNarrowReader(window.innerWidth)) revealThreadPanel();
       else if (contextPassageId) scrollToPassage(contextPassageId);
     } catch (e) {
+      // A superseded request's failure must never replace the current thread's
+      // state or error text.
+      if (!isCurrentThreadRequest(threadRequests.current, requestToken)) return;
       setError(requestErrorMessage(e, 'could not reopen thread'));
     }
   }
