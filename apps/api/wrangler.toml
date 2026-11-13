@@ -1,6 +1,6 @@
 # Bhasya $0 architecture (ARCHITECTURE.md, authoritative + frozen):
 #   Cloudflare Worker (src/worker.ts, same Hono router)
-#   → Supabase PostgreSQL/pgvector (DATABASE_URL secret)
+#   → Supabase PostgreSQL/pgvector (HYPERDRIVE staging; DATABASE_URL fallback)
 #   → Supabase Storage behind StoragePort ($0 baseline, private bucket
 #     `bhasya-artifacts`). No Node production server. No R2 billing.
 #
@@ -17,7 +17,7 @@
 #   npx wrangler dev --local          # workerd, no R2 binding required
 #
 # $0 staging deploy (no R2):
-#   npx wrangler secret put DATABASE_URL            # Supabase PostgreSQL/pgvector
+#   # Staging uses the HYPERDRIVE binding below; no DATABASE_URL secret is required.
 #   npx wrangler secret put BETTER_AUTH_SECRET
 #   npx wrangler secret put BHASYA_MODEL_API_KEY    # if using a real provider
 #   npx wrangler secret put SUPABASE_SERVICE_KEY    # service_role, server-side only
@@ -38,7 +38,7 @@ compatibility_flags = ["nodejs_compat"]
 # Plain vars only (no secrets here). Secrets are set via
 # `wrangler secret put` / Cloudflare dashboard and never committed.
 # SUPABASE_URL is set as a var per environment (dashboard / --var) and
-# SUPABASE_SERVICE_KEY / DATABASE_URL / BETTER_AUTH_SECRET as secrets —
+# SUPABASE_SERVICE_KEY / BETTER_AUTH_SECRET as secrets; DATABASE_URL is fallback —
 # no credentials are invented or committed here.
 [vars]
 BHASYA_USE_AUTH = "1"
@@ -86,8 +86,8 @@ bucket_name = "bhasya-artifacts"
 
 # Optional future production PostgreSQL/pgvector via Hyperdrive. `id` is the
 # Hyperdrive config id from your Cloudflare account (replace before any
-# production deploy). $0 staging uses the DATABASE_URL secret (Supabase
-# PostgreSQL) instead and needs no Hyperdrive binding.
+# production deploy). Staging uses the top-level HYPERDRIVE binding above.
+# Production has its own separate Hyperdrive binding below.
 [[env.production.hyperdrive]]
 binding = "HYPERDRIVE"
 id = "REPLACE_WITH_HYPERDRIVE_ID"
