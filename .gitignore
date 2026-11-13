@@ -21,3 +21,5 @@ diag-*.txt
 flow-*-tmp.mjs
 staging-*-tmp.mjs
 tail-*.txt
+apps/web/.open-next/
+apps/web/cloudflare-env.d.ts

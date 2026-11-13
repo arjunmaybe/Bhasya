@@ -114,8 +114,8 @@ export function supabaseConfigFromEnv(env?: Record<string, unknown>): { url: str
  *   Fails closed only when neither configured backend is available.
  * - Else local dev → LocalStorageAdapter (filesystem, Node only).
  *
- * - Production (`BHASYA_USE_AUTH=1`): requires `DATABASE_URL` (PostgreSQL)
- *   and either an R2 bucket binding or Supabase staging env; does NOT seed
+ * - Production (`BHASYA_USE_AUTH=1`): requires PostgreSQL via `HYPERDRIVE`
+ *   or `DATABASE_URL` fallback, plus R2 or Supabase Storage; does NOT seed
  *   the dev user.
  * - Local dev: PGlite/Postgres + migrate + single seeded dev user.
  *
@@ -139,8 +139,8 @@ export async function getServices(opts: ServicesOptions = {}): Promise<Services>
   const databaseUrl = hyperdriveStr ?? readEnvValue('DATABASE_URL', env);
   if (!opts.db && prod && !databaseUrl) {
     throw new Error(
-      'DATABASE_URL (PostgreSQL/pgvector, Hyperdrive recommended) required in production. ' +
-      'Bind Hyperdrive (HYPERDRIVE) or set the DATABASE_URL secret; PGlite is local-dev only.',
+      'PostgreSQL/pgvector connection required in production. ' +
+      'Bind HYPERDRIVE or set the DATABASE_URL secret; PGlite is local-dev only.',
     );
   }
 

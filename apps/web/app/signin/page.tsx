@@ -24,9 +24,10 @@ function safeNext(raw: string | string[] | undefined): string {
 export default async function SignInPage({
   searchParams,
 }: {
-  searchParams?: { next?: string | string[] };
+  searchParams: Promise<{ next?: string | string[] }>;
 }) {
-  const next = safeNext(searchParams?.next);
+  const { next: rawNext } = await searchParams;
+  const next = safeNext(rawNext);
   const user = await getSessionUser();
   if (user) redirect(next);
 

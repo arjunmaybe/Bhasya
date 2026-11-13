@@ -1,21 +1,23 @@
 # Bhasya $0 architecture (ARCHITECTURE.md, authoritative + frozen):
 #   Cloudflare Worker (src/worker.ts, same Hono router)
-#   → Supabase PostgreSQL/pgvector (DATABASE_URL secret)
+#   → Supabase PostgreSQL/pgvector (HYPERDRIVE staging; DATABASE_URL fallback)
 #   → Supabase Storage behind StoragePort ($0 baseline, private bucket
 #     `bhasya-artifacts`). No Node production server. No R2 billing.
 #
-# Default deploy (no --env flag) IS $0 staging and must NOT require an R2
-# bucket binding, R2 billing, or Hyperdrive. Staging storage is selected in
-# code (apps/api/src/services.ts): R2 binding present → R2, else
-# SUPABASE_URL + SUPABASE_SERVICE_KEY → Supabase, else fail closed (prod) /
-# filesystem (local dev). The app sees only StoragePort put/get.
+# Default deploy (no --env flag) IS $0 staging. It uses the existing
+# HYPERDRIVE binding `bhasya-staging-verified` for Supabase PostgreSQL and
+# Supabase Storage for private artifacts. No R2 bucket binding or R2 billing
+# is required. Storage is selected in code (apps/api/src/services.ts):
+# R2 binding present → R2, else SUPABASE_URL + SUPABASE_SERVICE_KEY →
+# Supabase, else fail closed (prod) / filesystem (local dev).
+# The app sees only StoragePort put/get.
 #
 # Usage (no account needed for local verification):
 #   cp .dev.vars.example .dev.vars   # fill local values, never commit
 #   npx wrangler dev --local          # workerd, no R2 binding required
 #
 # $0 staging deploy (no R2):
-#   npx wrangler secret put DATABASE_URL            # Supabase PostgreSQL/pgvector
+#   # Staging uses the HYPERDRIVE binding below; no DATABASE_URL secret is required.
 #   npx wrangler secret put BETTER_AUTH_SECRET
 #   npx wrangler secret put BHASYA_MODEL_API_KEY    # if using a real provider
 #   npx wrangler secret put SUPABASE_SERVICE_KEY    # service_role, server-side only
@@ -36,7 +38,7 @@ compatibility_flags = ["nodejs_compat"]
 # Plain vars only (no secrets here). Secrets are set via
 # `wrangler secret put` / Cloudflare dashboard and never committed.
 # SUPABASE_URL is set as a var per environment (dashboard / --var) and
-# SUPABASE_SERVICE_KEY / DATABASE_URL / BETTER_AUTH_SECRET as secrets —
+# SUPABASE_SERVICE_KEY / BETTER_AUTH_SECRET as secrets; DATABASE_URL is fallback —
 # no credentials are invented or committed here.
 [vars]
 BHASYA_USE_AUTH = "1"
@@ -44,6 +46,7 @@ BETTER_AUTH_URL = "https://bhasya-api.devmesh-8143.workers.dev"
 # Public sign-up stays closed in every authenticated deployment (the library
 # also defaults to closed; an explicit disable can never be overridden).
 BHASYA_DISABLE_SIGNUP = "1"
+BHASYA_WEB_ORIGIN = "https://bhasya-web.devmesh-8143.workers.dev"
 # Browser origin allowed to call Better Auth. Set per deployment; it must be a
 # single explicit https origin (no wildcard, no headers-derived trust).
 # BHASYA_WEB_ORIGIN = "https://<web-origin>"
@@ -52,14 +55,17 @@ BHASYA_MODEL_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 SUPABASE_URL = "https://ylolimxijkwoiwbhkexn.supabase.co"
 SUPABASE_STORAGE_BUCKET = "bhasya-artifacts"
 
-# Staging database transport: direct DATABASE_URL → Supabase PostgreSQL
-# (rolled back from Hyperdrive on 2026-09-30 after bounded verification showed
-# fast 500s/timeouts on DB-backed reads; Hyperdrive config retained in the
-# account for diagnosis, NOT bound here). Production profile below untouched.
-# Optional future production profile ONLY (Cloudflare R2 + Hyperdrive).
+# Staging database transport uses the existing Hyperdrive configuration
+# `bhasya-staging-verified` for Supabase PostgreSQL. Supabase Storage remains
+# the $0 file-storage baseline; no R2 binding is needed for staging.
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "f6b05c0312f24277a43e61930042da9f"
+
+# Optional future production profile ONLY (Cloudflare R2 + separate Hyperdrive).
 # Isolated here so the DEFAULT ($0 staging) deploy never requires an R2
-# bucket binding, R2 billing, or Hyperdrive. Nothing here is read by the
-# default `wrangler deploy` / `--dry-run` without `--env production`.
+# bucket binding or R2 billing. Nothing here is read by the default
+# `wrangler deploy` / `--dry-run` without `--env production`.
 
 [env.production]
 # Wrangler does not inherit top-level `vars` into environments, so the
@@ -80,8 +86,8 @@ bucket_name = "bhasya-artifacts"
 
 # Optional future production PostgreSQL/pgvector via Hyperdrive. `id` is the
 # Hyperdrive config id from your Cloudflare account (replace before any
-# production deploy). $0 staging uses the DATABASE_URL secret (Supabase
-# PostgreSQL) instead and needs no Hyperdrive binding.
+# production deploy). Staging uses the top-level HYPERDRIVE binding above.
+# Production has its own separate Hyperdrive binding below.
 [[env.production.hyperdrive]]
 binding = "HYPERDRIVE"
 id = "REPLACE_WITH_HYPERDRIVE_ID"

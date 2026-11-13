@@ -1,0 +1,18 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "bhasya-web",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-11-13",
+  "compatibility_flags": [
+    "global_fetch_strictly_public"
+  ],
+  "workers_dev": true,
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS",
+    "run_worker_first": false
+  },
+  "vars": {
+    "BHASYA_API_URL": "https://bhasya-api.devmesh-8143.workers.dev"
+  }
+}

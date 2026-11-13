@@ -1,6 +1,9 @@
 import nextConstants from 'next/constants.js';
+import { initOpenNextCloudflareForDev } from '@opennextjs/cloudflare';
 
 const { PHASE_DEVELOPMENT_SERVER } = nextConstants;
+
+initOpenNextCloudflareForDev();
 
 /**
  * Separate dev/prod build output so `next dev` (dev webpack layout:
@@ -13,7 +16,7 @@ const { PHASE_DEVELOPMENT_SERVER } = nextConstants;
  */
 const config = (phase, _options) => ({
   reactStrictMode: true,
-  experimental: { serverActions: { allowedOrigins: ['*'] } },
+  // Server Actions retain Next.js same-origin validation defaults.
   distDir: phase === PHASE_DEVELOPMENT_SERVER ? '.next-dev' : '.next',
 });
 

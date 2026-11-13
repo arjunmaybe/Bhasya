@@ -32,7 +32,8 @@ function apiOrigin(): string {
 }
 
 async function serverRequest(path: string, init?: RequestInit): Promise<any> {
-  const cookie = headers().get('cookie');
+  const requestHeaders = await headers();
+  const cookie = requestHeaders.get('cookie');
   const res = await fetch(`${apiOrigin()}${path}`, {
     ...init,
     headers: {
