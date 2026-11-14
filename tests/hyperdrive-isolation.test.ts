@@ -37,7 +37,7 @@ const APP_TABLES = [
   'users', 'workspaces', 'workspace_members', 'sources', 'document_versions',
   'document_nodes', 'passages', 'anchors', 'highlights', 'threads',
   'thread_messages', 'evidence', 'citations', 'embeddings', 'event_log',
-  'auth_sessions',
+  'exports', 'reading_progress', 'auth_sessions',
 ];
 const AUTH_TABLES = ['user', 'session', 'account', 'verification'];
 

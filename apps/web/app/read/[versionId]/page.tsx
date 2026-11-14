@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { api } from '@/lib/api.server';
-import { ApiError } from '@/lib/api';
+import { ApiError, type ReadingProgressDto } from '@/lib/api';
 import { AuthRequired } from '@/components/AuthRequired';
 import { ReaderClient } from '@/components/ReaderClient';
 
@@ -48,6 +48,19 @@ export default async function ReadPage({ params }: { params: Promise<{ versionId
   const headings = nodes.filter((n) => n.node_type === 'heading');
   const passageByNode = new Map(passages.map((p) => [p.node_id, p]));
 
+  // Resume point is best-effort: the document must still render when the
+  // progress read fails. 'unavailable' keeps the reader from auto-saving over
+  // a position it could not read.
+  let progress: ReadingProgressDto | null = null;
+  let progressState: 'none' | 'present' | 'unavailable' = 'unavailable';
+  try {
+    const saved = await api.getProgress(versionId);
+    progress = saved.progress ?? null;
+    progressState = progress ? 'present' : 'none';
+  } catch {
+    progressState = 'unavailable';
+  }
+
   return (
     <ReaderClient
       versionId={versionId}
@@ -56,6 +69,8 @@ export default async function ReadPage({ params }: { params: Promise<{ versionId
       nodes={nodes}
       passages={passages}
       initialHighlights={highlights}
+      initialProgress={progress}
+      progressState={progressState}
       headingBySection={Object.fromEntries(headings.map((h) => [h.parent_id ?? '', h.text]))}
       passageByNodeId={Object.fromEntries([...passageByNode.entries()].map(([k, v]) => [k, v.id]))}
     />

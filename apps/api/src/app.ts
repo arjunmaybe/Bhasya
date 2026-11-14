@@ -5,8 +5,9 @@ import { logEvent } from '@bhasya/db';
 import { HttpError, authorize } from '../../../authorization/resource-resolvers.js';
 import { explainSelection, getServices, ingestSource, reingestSource, resolveAnchor, streamExplainSelection } from './services.js';
 import { createReadingSessionExport, getExportForDownload, sortNodesForExport } from './export-service.js';
+import { getReadingProgress, saveReadingProgress } from './reading-progress.js';
 import type { ExplainArgs, ExplainStreamEvent, Identity } from './services.js';
-import { CreateHighlightSchema, CreateThreadSchema, ExplainSchema, IngestSchema, PostMessageSchema, ResolveAnchorSchema } from './schema.js';
+import { CreateHighlightSchema, CreateThreadSchema, ExplainSchema, IngestSchema, PostMessageSchema, ReadingProgressSchema, ResolveAnchorSchema } from './schema.js';
 import { withTransaction } from '../../../db/transactions.js';
 
 export function createApp(): Hono {
@@ -16,7 +17,16 @@ export function createApp(): Hono {
   // arbitrary request headers never select the user — getIdentityForRequest
   // resolves via auth.api.getSession({ headers }) only. `x-dev-user`
   // and `?user=` selectors were removed and remain unsupported here.
-  app.use('*', cors({ origin: '*', allowMethods: ['GET', 'POST', 'OPTIONS'], allowHeaders: ['Content-Type', 'Authorization'] }));
+  app.use('*', cors({ origin: '*', allowMethods: ['GET', 'POST', 'PUT', 'OPTIONS'], allowHeaders: ['Content-Type', 'Authorization'] }));
+
+  // Reader-progress responses are per-user state and must never be cached —
+  // including 400/401/404/500. Set before the handler runs so Hono merges the
+  // prepared header into every response this path can produce.
+  const noStoreProgress = async (c: any, next: () => Promise<void>) => {
+    c.header('Cache-Control', 'no-store');
+    await next();
+  };
+  app.use('/api/documents/:versionId/progress', noStoreProgress);
 
   app.get('/healthz', (c) => c.json({ ok: true, service: 'bhasya-api', phase: 1 }));
 
@@ -444,6 +454,36 @@ export function createApp(): Hono {
       const resolved = await authorize(svc.db, identity, 'document_version', c.req.param('versionId'));
       await logEvent(svc.db, { workspaceId: resolved.workspaceId, userId: identity.userId, eventType: 'document_completed', resourceType: 'document_version', resourceId: c.req.param('versionId') });
       return c.json({ ok: true });
+    } catch (e) { return err(c, e); }
+  });
+
+  // ── Reader progress (per-user resume point) ──
+  // Private to the authenticated user: identity comes from the session, the
+  // version is authorized against workspace membership, and the service
+  // scopes every query by user_id. No event_log write: event_type is
+  // CHECK-constrained in frozen 001 and progress is not a funnel event.
+  // Cache-Control: no-store is applied by the middleware above.
+  app.get('/api/documents/:versionId/progress', async (c) => {
+    try {
+      const svc = await getServices();
+      const identity = await getIdentityForRequest(svc.db, c.req.raw.headers, { env: ((c as unknown as { env?: Record<string, unknown> }).env ?? {}) });
+      if (!identity) return c.json({ error: 'unauthenticated' }, 401);
+      const progress = await getReadingProgress(svc, identity, c.req.param('versionId'));
+      return c.json({ progress });
+    } catch (e) { return err(c, e); }
+  });
+
+  app.put('/api/documents/:versionId/progress', async (c) => {
+    try {
+      const svc = await getServices();
+      const identity = await getIdentityForRequest(svc.db, c.req.raw.headers, { env: ((c as unknown as { env?: Record<string, unknown> }).env ?? {}) });
+      if (!identity) return c.json({ error: 'unauthenticated' }, 401);
+      // Malformed JSON is a client error, not a server fault.
+      const body = await c.req.json().catch(() => null);
+      const parsed = ReadingProgressSchema.safeParse(body);
+      if (!parsed.success) return c.json({ error: 'invalid request' }, 400);
+      const progress = await saveReadingProgress(svc, identity, c.req.param('versionId'), parsed.data);
+      return c.json({ progress });
     } catch (e) { return err(c, e); }
   });
 
