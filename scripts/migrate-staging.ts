@@ -33,6 +33,7 @@ const APP_TABLES = [
   'citations',
   'embeddings',
   'event_log',
+  'reading_progress',
   'auth_sessions',
 ];
 // Better Auth owns these (created via its Kysely adapter in migrate()).

@@ -296,7 +296,7 @@ export function splitStatements(sql: string): string[] {
 }
 
 /**
- * Expected schema marker (mirrors db/migrations/001→003 + Better Auth core
+ * Expected schema marker (mirrors db/migrations/001→005 + Better Auth core
  * tables; same lists as scripts/migrate-staging.ts verification readout).
  *
  * Every Worker cold start runs migrate() before serving (apps/api/src/worker.ts),
@@ -323,6 +323,7 @@ const MIGRATED_APP_TABLES = [
   'evidence',
   'citations',
   'exports',
+  'reading_progress',
   'embeddings',
   'event_log',
   'auth_sessions',
@@ -384,9 +385,15 @@ export async function migrate(db: DbClient): Promise<void> {
   // Ordered migrations. 001 is FROZEN; 002 adds the legacy custom session
   // table (kept for existing databases, NOT used for auth); 003 adds the
   // additive app-user link to the Better Auth user; 004 adds the additive
-  // reading-session PDF exports table. None touch the canonical
-  // document model.
-  const files = ['001_initial_schema.sql', '002_auth_sessions.sql', '003_app_users_external_id.sql', '004_exports.sql'];
+  // reading-session PDF exports table; 005 adds the additive per-user
+  // reading-progress resume point. None touch the canonical document model.
+  const files = [
+    '001_initial_schema.sql',
+    '002_auth_sessions.sql',
+    '003_app_users_external_id.sql',
+    '004_exports.sql',
+    '005_reading_progress.sql',
+  ];
   let loadedAny = false;
   for (const name of files) {
     const sql = await readMigrationFile(name);
@@ -400,19 +407,21 @@ export async function migrate(db: DbClient): Promise<void> {
   if (!loadedAny) {
     // No migration files available (Cloudflare Worker bundle has no node:fs).
     // Bootstrap the SAME frozen schema in the SAME order as the file path
-    // above (001 → 002 → 003 → Better Auth) using the verbatim embedded
-    // copies (embeddedMigrations.ts); db/migrations/* remain canonical.
+    // above (001 → 002 → 003 → 004 → 005 → Better Auth) using the verbatim
+    // embedded copies (embeddedMigrations.ts); db/migrations/* remain
+    // canonical.
     // Idempotent (IF NOT EXISTS everywhere + tracked Better Auth migrations),
     // so externally-migrated production databases are unaffected.
     // Previously this branch ran only the legacy auth_sessions DDL — which
     // REFERENCES users(id) — before users existed, and returned before
     // creating the Better Auth schema (relation "users" does not exist).
-    const { EMBEDDED_001_INITIAL_SCHEMA, EMBEDDED_003_APP_USERS_LINK, EMBEDDED_004_EXPORTS } = await import('./embeddedMigrations.js');
+    const { EMBEDDED_001_INITIAL_SCHEMA, EMBEDDED_003_APP_USERS_LINK, EMBEDDED_004_EXPORTS, EMBEDDED_005_READING_PROGRESS } = await import('./embeddedMigrations.js');
     await runAllWithVectorFallback(EMBEDDED_001_INITIAL_SCHEMA);
     const { ensureAuthTables } = await import('./auth.js');
     await ensureAuthTables(db);
     await runAll(EMBEDDED_003_APP_USERS_LINK);
     await runAll(EMBEDDED_004_EXPORTS);
+    await runAll(EMBEDDED_005_READING_PROGRESS);
     // Better Auth owns its own tables (user/session/account/verification).
     const { ensureBetterAuthSchema } = await import('./betterAuth.js');
     await ensureBetterAuthSchema(db);

@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
-import { ApiError, browserReq } from '@/lib/api';
+import { ApiError, browserReq, type ReadingProgressDto } from '@/lib/api';
 import {
   createStreamLane,
   laneBegin,
@@ -29,6 +29,17 @@ import {
   type TextRange,
 } from '@/lib/highlight-render';
 import { isNarrowReader } from '@/lib/reader-viewport';
+import {
+  READING_LINE_RATIO,
+  isReadingLineInsideDoc,
+  passageAtLine,
+  progressIsAtBeginning,
+  resumeScrollTop,
+  shouldQueueProgress,
+  type PassageBand,
+  type ProgressSample,
+} from '@/lib/reading-position';
+import { createProgressInstanceId, createProgressSaver } from '@/lib/progress-save';
 
 interface NodeDto { id: string; parent_id: string | null; node_type: string; structural_path: string; text: string }
 interface PassageDto { id: string; node_id: string; structural_path: string; text: string }
@@ -259,6 +270,48 @@ async function consumeThreadStream(
 }
 
 /**
+ * Reading line sampling. The line sits at a fixed fraction of the viewport;
+ * the passage it crosses owns the position. Binary search over the rendered
+ * passages keeps this cheap on long documents — only the passage under the
+ * line and its successor are measured. Returns null when the line is outside
+ * the document surface (for example while a narrow-viewport thread panel
+ * holds the viewport) so no bogus position is ever queued.
+ */
+const PROGRESS_SAMPLE_DELAY_MS = 400;
+
+function measureProgressSample(container: HTMLElement | null): ProgressSample | null {
+  if (!container || typeof window === 'undefined') return null;
+  const lineY = window.innerHeight * READING_LINE_RATIO;
+  if (!isReadingLineInsideDoc(container.getBoundingClientRect(), lineY)) return null;
+
+  const elements = container.querySelectorAll<HTMLElement>('.passage[data-passage-id]');
+  if (elements.length === 0) return null;
+
+  let lo = 0;
+  let hi = elements.length - 1;
+  let found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (elements[mid].getBoundingClientRect().top <= lineY) {
+      found = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  const start = found >= 0 ? found : 0;
+  const bands: PassageBand[] = [];
+  for (let i = start; i < Math.min(elements.length, start + 2); i += 1) {
+    const id = elements[i].getAttribute('data-passage-id');
+    if (!id) continue;
+    const rect = elements[i].getBoundingClientRect();
+    bands.push({ id, top: rect.top, bottom: rect.bottom });
+  }
+  return passageAtLine(bands, lineY);
+}
+
+/**
  * Client Component: the interactive reading surface.
  * - text selection → passage identification → Explain popover
  * - anchor/highlight persistence, passage thread panel, citation navigation
@@ -280,6 +333,8 @@ export function ReaderClient(props: {
   nodes: NodeDto[];
   passages: PassageDto[];
   initialHighlights: HighlightDto[];
+  initialProgress: ReadingProgressDto | null;
+  progressState: 'none' | 'present' | 'unavailable';
   headingBySection: Record<string, string>;
   passageByNodeId: Record<string, string>;
 }) {
@@ -365,6 +420,27 @@ export function ReaderClient(props: {
   const pendingExplainRef = useRef<string | null>(null);
   const focusAfterSendRef = useRef(false);
   const citeFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /**
+   * Resume progress. The saved point is offered as an explicit choice; while
+   * `resumeDecided` is false nothing is saved, so a failed or ignored prompt
+   * can never overwrite the stored position. 'unavailable' means the server
+   * read failed and saving stays off for this mount for the same reason.
+   */
+  const firstPassageId = passages[0]?.id;
+  const [resumeDecided, setResumeDecided] = useState<boolean>(
+    () => props.progressState !== 'present'
+      || props.initialProgress == null
+      || progressIsAtBeginning(props.initialProgress, passages[0]?.id),
+  );
+  const resumeDecidedRef = useRef(resumeDecided);
+  const progressSaver = useRef<ReturnType<typeof createProgressSaver> | null>(null);
+  const lastQueuedProgress = useRef<ProgressSample | null>(null);
+  const progressSampleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Programmatic navigation (resume / start over) must not be sampled
+  // mid-flight: intermediate scroll positions are not where the reader is.
+  const restoringPosition = useRef(false);
+  const restoreSettleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /**
    * Measured minimum card height that keeps the fixed chrome reachable.
@@ -537,6 +613,223 @@ export function ReaderClient(props: {
     if (prefersReducedMotion()) el.scrollIntoView({ block: 'start' });
     else el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, []);
+
+  useEffect(() => {
+    resumeDecidedRef.current = resumeDecided;
+  }, [resumeDecided]);
+
+  // Browser scroll restoration would compete with the explicit resume choice:
+  // a reload/back navigation could land mid-document before the reader picks.
+  // Manual for this surface only; the previous value is restored on unmount.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const history = window.history;
+    if (!history || !('scrollRestoration' in history)) return;
+    const previous = history.scrollRestoration;
+    history.scrollRestoration = 'manual';
+    return () => { history.scrollRestoration = previous; };
+  }, []);
+
+  /**
+   * Queue the reader's current position. Every gate here is deliberate:
+   * no choice yet, unreadable saved state, and programmatic scrolling all
+   * suppress sampling instead of guessing. Unload samples (keepalive) skip
+   * only the movement threshold: the matching normal request may still be in
+   * flight and can be dropped by the unload, so the newest position must be
+   * resent even when it has not moved. Scroll sampling keeps its dedupe.
+   */
+  const queueCurrentPosition = useCallback((keepalive = false) => {
+    if (!resumeDecidedRef.current) return;
+    if (props.progressState === 'unavailable') return;
+    if (restoringPosition.current) return;
+    const sample = measureProgressSample(docRef.current);
+    if (!sample) return;
+    if (!keepalive && !shouldQueueProgress(lastQueuedProgress.current, sample)) return;
+    lastQueuedProgress.current = sample;
+    void progressSaver.current?.save(sample, { keepalive });
+  }, [props.progressState]);
+
+  // Trailing-edge throttle: active scrolling produces at most one position
+  // every PROGRESS_SAMPLE_DELAY_MS, and the queue collapses overlaps.
+  useEffect(() => {
+    if (!resumeDecided || props.progressState === 'unavailable') return;
+    const onScroll = () => {
+      // A programmatic jump (resume / start over) is not the reader moving.
+      // Ignoring its events keeps "Start from beginning" at its explicit
+      // first-passage/0 save and never persists an intermediate position.
+      if (restoringPosition.current) return;
+      if (progressSampleTimer.current) return;
+      progressSampleTimer.current = setTimeout(() => {
+        progressSampleTimer.current = null;
+        queueCurrentPosition();
+      }, PROGRESS_SAMPLE_DELAY_MS);
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', onScroll);
+      if (progressSampleTimer.current) {
+        clearTimeout(progressSampleTimer.current);
+        progressSampleTimer.current = null;
+      }
+    };
+  }, [resumeDecided, props.progressState, queueCurrentPosition]);
+
+  // Page hide / tab hide: the newest position must leave with keepalive even
+  // if a normal request is still in flight.
+  useEffect(() => {
+    const flushPosition = () => {
+      queueCurrentPosition(true);
+      progressSaver.current?.flush({ keepalive: true });
+    };
+    const onPageHide = () => flushPosition();
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flushPosition();
+    };
+    window.addEventListener('pagehide', onPageHide);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [queueCurrentPosition]);
+
+  // Ends a programmatic-scroll window opened by scrollPageTo.
+  const finishRestore = useCallback(() => {
+    if (restoreSettleTimer.current) {
+      clearTimeout(restoreSettleTimer.current);
+      restoreSettleTimer.current = null;
+    }
+    window.removeEventListener('scrollend', finishRestore);
+    restoringPosition.current = false;
+  }, []);
+
+  // Scroll the page to an absolute offset with the reader's motion setting.
+  // Every programmatic move — smooth or reduced-motion instant — opens a
+  // restoring window whose scroll events are ignored, so no intermediate (or
+  // just-settled) position is sampled. Resume keeps the stored point and
+  // "Start from beginning" keeps its explicit first-passage/0 save until the
+  // reader scrolls themselves.
+  const scrollPageTo = useCallback((top: number) => {
+    if (progressSampleTimer.current) {
+      clearTimeout(progressSampleTimer.current);
+      progressSampleTimer.current = null;
+    }
+    if (restoreSettleTimer.current) {
+      clearTimeout(restoreSettleTimer.current);
+      restoreSettleTimer.current = null;
+    }
+    restoringPosition.current = true;
+    const smooth = !prefersReducedMotion();
+    // An instant jump dispatches its scroll event before the next paint; a
+    // smooth one ends at scrollend. Both keep a timeout fallback (no shorter
+    // than the sampling delay, so a late scroll event is still ignored).
+    restoreSettleTimer.current = setTimeout(finishRestore, smooth ? 700 : 400);
+    window.addEventListener('scrollend', finishRestore, { once: true });
+    window.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
+  }, [finishRestore]);
+
+  /**
+   * The saver is created per setup and disposed by this effect's cleanup.
+   * It must not be created during render: React Strict Mode replays mount
+   * effects as setup → cleanup → setup, and a render-created saver would be
+   * disposed by the simulated cleanup while the same ref is reused, leaving
+   * progress saving permanently disabled in development. Each setup gets its
+   * own instance id and sequence space; a real unmount still flushes the last
+   * position and lets dispatched requests finish.
+   */
+  useEffect(() => {
+    const saver = createProgressSaver((payload, options) =>
+      browserReq(`/api/documents/${versionId}/progress`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          passageId: payload.passageId,
+          offsetRatio: payload.offsetRatio,
+          // Per-reader-instance ordering guard: out-of-order requests from
+          // this setup can never regress the stored position.
+          instanceId: options.instanceId,
+          sequence: options.sequence,
+        }),
+        ...(options.keepalive ? { keepalive: true } : {}),
+      }), { instanceId: createProgressInstanceId() });
+    progressSaver.current = saver;
+    return () => {
+      // Sampling/listener cleanups run before this one; persist the final
+      // position, dispatch what is queued, then stop timers. Only this
+      // setup's saver is disposed, so a Strict Mode replay starts clean.
+      queueCurrentPosition();
+      saver.flush();
+      saver.dispose();
+      if (progressSaver.current === saver) progressSaver.current = null;
+      if (progressSampleTimer.current) {
+        clearTimeout(progressSampleTimer.current);
+        progressSampleTimer.current = null;
+      }
+      if (restoreSettleTimer.current) {
+        clearTimeout(restoreSettleTimer.current);
+        restoreSettleTimer.current = null;
+      }
+      window.removeEventListener('scrollend', finishRestore);
+    };
+  }, [versionId, queueCurrentPosition, finishRestore]);
+
+  // Inverse of sampling: put the saved passage's relative point back on the
+  // reading line. Uses the page scroll (not scrollToPassage) so no highlight
+  // flash is added and the existing passage-reveal contract is untouched.
+  // Returns false when the anchor is not rendered, so the caller can fall back
+  // instead of guessing a position.
+  const restoreProgress = useCallback((sample: ProgressSample): boolean => {
+    const el = docRef.current?.querySelector<HTMLElement>(`[data-passage-id="${sample.passageId}"]`);
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    // Page scroller, not fixed-position screen coords: the reading line is a
+    // viewport fraction, so the absolute target needs the page offset.
+    const scroller = document.scrollingElement ?? document.documentElement;
+    const pageHeight = scroller.getBoundingClientRect().height;
+    scrollPageTo(resumeScrollTop(sample, {
+      scrollY: scroller.scrollTop,
+      passageTop: rect.top,
+      passageHeight: rect.height,
+      lineY: window.innerHeight * READING_LINE_RATIO,
+      maxScrollTop: Math.max(0, pageHeight - window.innerHeight),
+    }));
+    return true;
+  }, [scrollPageTo]);
+
+  // Beginning = first passage at ratio 0 and the top of the page. Also the
+  // safe fallback when a saved anchor no longer exists.
+  const saveBeginningAndScroll = useCallback(() => {
+    if (firstPassageId) {
+      const sample = { passageId: firstPassageId, offsetRatio: 0 };
+      lastQueuedProgress.current = sample;
+      void progressSaver.current?.save(sample);
+    }
+    scrollPageTo(0);
+  }, [firstPassageId, scrollPageTo]);
+
+  const resumeFromProgress = useCallback(() => {
+    const saved = props.initialProgress;
+    setResumeDecided(true);
+    resumeDecidedRef.current = true;
+    if (!saved) return;
+    // The strip is removed by the state update; measure after that reflow.
+    window.requestAnimationFrame(() => {
+      const restored = restoreProgress({
+        passageId: saved.passageId,
+        offsetRatio: saved.offsetRatio,
+      });
+      if (restored) return;
+      // The stored anchor is not rendered in this document version: restart at
+      // the beginning and repair the row. Never leave the reader somewhere
+      // unrelated and never persist a guessed location.
+      saveBeginningAndScroll();
+    });
+  }, [props.initialProgress, restoreProgress, saveBeginningAndScroll]);
+
+  const startReadingFromBeginning = useCallback(() => {
+    setResumeDecided(true);
+    resumeDecidedRef.current = true;
+    saveBeginningAndScroll();
+  }, [saveBeginningAndScroll]);
 
   // Intentional article interaction collapses expanded -> compact WITHOUT
   // touching thread state (thread, passage, messages, citations all stay).
@@ -1180,6 +1473,10 @@ export function ReaderClient(props: {
   }, [nodes, props.headingBySection]);
 
   const activePassage = activePassageId ? passageMap.get(activePassageId) ?? null : null;
+  const showResumePrompt = !resumeDecided
+    && props.progressState === 'present'
+    && props.initialProgress != null
+    && typeof firstPassageId === 'string';
 
   return (
     <div
@@ -1192,6 +1489,29 @@ export function ReaderClient(props: {
             <h1>{title}</h1>
             {sourceUrl ? <p className="meta doc-source">{sourceUrl}</p> : null}
           </header>
+          {showResumePrompt ? (
+            <div className="resume-strip" role="group" aria-label="Reading position">
+              <p className="resume-strip-text">Continue from your last saved position.</p>
+              <div className="resume-strip-actions">
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  data-testid="resume-reading"
+                  onClick={resumeFromProgress}
+                >
+                  Resume reading
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  data-testid="start-from-beginning"
+                  onClick={startReadingFromBeginning}
+                >
+                  Start from beginning
+                </button>
+              </div>
+            </div>
+          ) : null}
           {sections.map(({ section, heading, children }) => (
             <section key={section.id} aria-label={heading || 'Document section'}>
               {heading ? <h2>{heading}</h2> : null}

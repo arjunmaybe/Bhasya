@@ -143,6 +143,10 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .doc h1 { font-size: 28px; line-height: 1.3; margin: 0 0 8px; letter-spacing: -0.01em; text-wrap: pretty; }
 .doc h2 { font-size: 20px; line-height: 1.4; margin: 28px 0 12px; letter-spacing: -0.005em; text-wrap: pretty; }
 .doc-source { overflow-wrap: break-word; }
+.resume-strip { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 0 16px; padding: 12px 16px; background: var(--surface-hover); border: 1px solid var(--border-subtle); border-radius: 6px; font-family: system-ui, sans-serif; }
+.resume-strip-text { margin: 0; font-size: 13px; line-height: 1.5; color: var(--ink-secondary); }
+.resume-strip-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+@media (max-width: 460px) { .resume-strip { align-items: stretch; flex-direction: column; } .resume-strip-actions { flex-direction: column; } .resume-strip-actions .btn-ghost { width: 100%; } }
 .passage-wrap { margin: 0; }
 .passage { line-height: 1.75; font-size: 17px; margin: 0 0 10px; scroll-margin-top: 20px; border-radius: 4px; padding: 4px 8px; overflow-wrap: break-word; min-width: 0; border-left: 3px solid transparent; }
 .passage.flash { animation: flash 1.6s ease; }

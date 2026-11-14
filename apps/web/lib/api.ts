@@ -53,6 +53,13 @@ export interface CitationDto {
   quote: string; passage_text: string; structural_path: string; node_id: string;
 }
 
+/** Per-user resume point: stable passage anchor + relative position inside it. */
+export interface ReadingProgressDto {
+  passageId: string;
+  offsetRatio: number;
+  updatedAt: string;
+}
+
 export function createApi(request: ApiRequest) {
   return {
     listSources: (): Promise<{ sources: Array<{ id: string; url: string; title: string; latest_version_id: string | null }> }> =>
@@ -74,6 +81,8 @@ export function createApi(request: ApiRequest) {
     getCitation: (id: string): Promise<{ citation: CitationDto }> => request(`/api/citations/${id}`),
     postMessage: (threadId: string, content: string): Promise<ExplainResult> =>
       request(`/api/threads/${threadId}/messages`, { method: 'POST', body: JSON.stringify({ content }) }),
+    getProgress: (versionId: string): Promise<{ progress: ReadingProgressDto | null }> =>
+      request(`/api/documents/${versionId}/progress`),
     requestExport: (versionId: string): Promise<ExportResult> =>
       request(`/api/documents/${versionId}/exports`, { method: 'POST' }),
   };
