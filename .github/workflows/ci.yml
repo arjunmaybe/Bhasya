@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [feat/reading-session-pdf-export]
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -31,5 +31,8 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Build
-        run: npm run build
+      - name: Build API
+        run: npm run build --workspace apps-api
+
+      - name: Build Cloudflare Worker
+        run: npm run cf:build --workspace apps-web

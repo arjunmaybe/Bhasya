@@ -23,3 +23,4 @@ staging-*-tmp.mjs
 tail-*.txt
 apps/web/.open-next/
 apps/web/cloudflare-env.d.ts
+apps/web/next-env.d.ts
