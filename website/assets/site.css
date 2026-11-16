@@ -666,7 +666,7 @@ strong {
 
 @media (min-width: 1121px) {
   .hero {
-    padding-block: var(--space-144);
+    padding-block: var(--space-80) var(--space-144);
   }
 
   .container {
