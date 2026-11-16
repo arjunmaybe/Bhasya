@@ -36,3 +36,11 @@ jobs:
 
       - name: Build Cloudflare Worker
         run: npm run cf:build --workspace apps-web
+
+      - name: Check public website
+        run: node website/tools/check.mjs
+
+      - name: Build public website preview
+        run: node website/tools/build.mjs
+        env:
+          SITE_ENV: preview
