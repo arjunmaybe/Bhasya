@@ -37,6 +37,7 @@ function parseProductionOrigin(raw) {
     host === "localhost" ||
     host === "127.0.0.1" ||
     host === "::1" ||
+    host === "[::1]" ||
     host.endsWith(".localhost") ||
     host.endsWith(".pages.dev") ||
     host.endsWith(".workers.dev");
