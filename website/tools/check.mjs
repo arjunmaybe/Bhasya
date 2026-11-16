@@ -516,7 +516,13 @@ function parseDeclarations(block) {
 const PADDING_PROPERTY =
   /^padding(-(top|right|bottom|left|block|inline)(-(start|end))?)?$/;
 
-function assertSpacingRule(source, selector, context, expected) {
+function assertSpacingRule(
+  source,
+  selector,
+  context,
+  expectedStart,
+  expectedEnd = expectedStart,
+) {
   const blocks = findRuleBlocks(source, selector);
   assert(
     blocks.length === 1,
@@ -537,9 +543,20 @@ function assertSpacingRule(source, selector, context, expected) {
     paddingBlock.length === 1,
     `${context}: ${selector} must declare padding-block exactly once`,
   );
+
+  const paddingValues = paddingBlock[0].value.split(/\s+/);
   assert(
-    paddingBlock[0].value === `var(${expected})`,
-    `${context}: ${selector} padding-block must be var(${expected}), got ${paddingBlock[0].value}`,
+    paddingValues.length === 1 || paddingValues.length === 2,
+    `${context}: ${selector} padding-block must contain one or two values, got ${paddingBlock[0].value}`,
+  );
+  const [actualStart, actualEnd = actualStart] = paddingValues;
+  assert(
+    actualStart === `var(${expectedStart})`,
+    `${context}: ${selector} padding-block-start must be var(${expectedStart}), got ${actualStart}`,
+  );
+  assert(
+    actualEnd === `var(${expectedEnd})`,
+    `${context}: ${selector} padding-block-end must be var(${expectedEnd}), got ${actualEnd}`,
   );
 }
 
@@ -599,7 +616,13 @@ function checkSpacingPlan(css) {
   assertSpacingRule(baseCss, ".section", "base CSS", "--space-64");
   assertSpacingRule(tablet[0].body, ".hero", "tablet CSS", "--space-112");
   assertSpacingRule(tablet[0].body, ".section", "tablet CSS", "--space-96");
-  assertSpacingRule(desktop[0].body, ".hero", "desktop CSS", "--space-144");
+  assertSpacingRule(
+    desktop[0].body,
+    ".hero",
+    "desktop CSS",
+    "--space-80",
+    "--space-144",
+  );
   assertSpacingRule(desktop[0].body, ".section", "desktop CSS", "--space-128");
   assertNoSectionVariantPadding(baseCss, "base CSS");
   assertNoSectionVariantPadding(tablet[0].body, "tablet CSS");
@@ -610,12 +633,12 @@ function checkSpacingPlan(css) {
     [375, { hero: "--space-80", section: "--space-64" }],
     [768, { hero: "--space-112", section: "--space-96" }],
     [1024, { hero: "--space-112", section: "--space-96" }],
-    [1440, { hero: "--space-144", section: "--space-128" }],
+    [1440, { hero: "--space-80", section: "--space-128" }],
   ]);
 
   for (const [width, expected] of expectedByWidth) {
     const effectiveHero =
-      width >= desktopMin ? "--space-144" : width >= tabletMin ? "--space-112" : "--space-80";
+      width >= desktopMin ? "--space-80" : width >= tabletMin ? "--space-112" : "--space-80";
     const effectiveSection =
       width >= desktopMin ? "--space-128" : width >= tabletMin ? "--space-96" : "--space-64";
     assert(
