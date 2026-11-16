@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bhasya: a reading workspace for long-form pages</title>
+  <meta name="description" content="Bhasya is a reading workspace that keeps explanations, highlights, threads, evidence, and citations attached to the passage they came from. Staging preview.">
+  <meta name="robots" content="noindex, nofollow" data-build-robots>
+  <meta name="theme-color" content="#f7f5ef">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <!-- BUILD:CANONICAL -->
+  <!-- BUILD:OG_URL -->
+  <meta property="og:title" content="Bhasya: a reading workspace for long-form pages">
+  <meta property="og:description" content="Select a passage, get an explanation attached to the text, and return to the same thread with its evidence and citations.">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Bhasya">
+  <!-- BUILD:OG_IMAGE -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Bhasya: a reading workspace for long-form pages">
+  <meta name="twitter:description" content="Select a passage, get an explanation attached to the text, and return to the same thread with its evidence and citations.">
+  <!-- BUILD:TWITTER_IMAGE -->
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="wordmark" href="/" aria-label="Bhasya home">Bhasya</a>
+      <p class="header-tagline">A reading workspace for long-form pages</p>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="#product">Product</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#status">Status</a>
+        <a href="https://github.com/arjunmaybe/Bhasya" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a class="nav-action" href="https://bhasya-web.devmesh-8143.workers.dev" target="_blank" rel="noopener noreferrer">Staging app</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">Passage-level reading</p>
+          <h1 id="hero-title">Keep the explanation beside the passage.</h1>
+          <p class="hero-deck">Bhasya imports a public page into a document you can read by passage. Select a sentence, ask for an explanation, and return to the same thread with its source and citations still attached.</p>
+          <p class="access-note">Staging preview. This staging demonstration uses an operator-provisioned account. Do not use sensitive material.</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="https://bhasya-web.devmesh-8143.workers.dev" target="_blank" rel="noopener noreferrer">Open the staging app</a>
+            <a class="button button-secondary" href="https://github.com/arjunmaybe/Bhasya" target="_blank" rel="noopener noreferrer">View the repository</a>
+          </div>
+        </div>
+
+        <figure class="screenshot-frame hero-figure">
+          <picture data-screenshot="reader-highlight">
+            <source type="image/avif" sizes="(min-width: 1121px) 660px, (min-width: 901px) 56vw, (min-width: 641px) calc(100vw - 64px), calc(100vw - 48px)" srcset="/assets/screenshots/reader-highlight-720.avif 720w, /assets/screenshots/reader-highlight-1440.avif 1440w">
+            <source type="image/webp" sizes="(min-width: 1121px) 660px, (min-width: 901px) 56vw, (min-width: 641px) calc(100vw - 64px), calc(100vw - 48px)" srcset="/assets/screenshots/reader-highlight-720.webp 720w, /assets/screenshots/reader-highlight-1440.webp 1440w">
+            <img
+              src="/assets/screenshots/reader-highlight-1440.webp"
+              srcset="/assets/screenshots/reader-highlight-720.webp 720w, /assets/screenshots/reader-highlight-1440.webp 1440w"
+              sizes="(min-width: 1121px) 660px, (min-width: 901px) 56vw, (min-width: 641px) calc(100vw - 64px), calc(100vw - 48px)"
+              width="1440"
+              height="900"
+              alt="Bhasya reader showing two highlighted passages, each with an Open thread control, beside a highlights list."
+            >
+          </picture>
+          <figcaption>Two highlighted passages in the staging reader, each with an Open thread control. Demonstration content.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section section-problem" aria-labelledby="problem-title">
+      <div class="container split">
+        <div>
+          <p class="section-label">The reading problem</p>
+          <h2 id="problem-title">A chat window is not a reading surface.</h2>
+        </div>
+        <div class="prose">
+          <p>Copying a passage into a general chat detaches the answer from the document. The answer has no stable address, so returning later means reconstructing the context by hand.</p>
+          <p>Bhasya treats the document as the primary object. Explanations, highlights, threads, evidence, and citations reference passages by stable identifiers, not a detached transcript.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="product" aria-labelledby="product-title">
+      <div class="container">
+        <div class="section-heading">
+          <p class="section-label">The product</p>
+          <h2 id="product-title">A passage, not a detached transcript.</h2>
+          <p class="lead">The reading surface keeps the source in view while the explanation stays tied to the exact text you selected.</p>
+        </div>
+
+        <div class="product-grid">
+          <div class="product-copy">
+            <p class="sequence">Import. Select. Explain. Reopen.</p>
+            <p>A public URL is fetched, normalized into a document node tree, and stored as an immutable version. Selecting text resolves an anchor with the passage, offsets, structural path, text hash, and context fingerprint.</p>
+            <p>The passage thread and highlight reference that anchor. A citation resolves back to the cited passage, so reopening the document restores the source context rather than a detached chat log.</p>
+          </div>
+
+          <figure class="screenshot-frame">
+            <picture data-screenshot="passage-thread">
+              <source type="image/avif" sizes="(min-width: 1121px) 660px, (min-width: 901px) 56vw, (min-width: 641px) calc(100vw - 64px), calc(100vw - 48px)" srcset="/assets/screenshots/passage-thread-720.avif 720w, /assets/screenshots/passage-thread-1440.avif 1440w">
+              <source type="image/webp" sizes="(min-width: 1121px) 660px, (min-width: 901px) 56vw, (min-width: 641px) calc(100vw - 64px), calc(100vw - 48px)" srcset="/assets/screenshots/passage-thread-720.webp 720w, /assets/screenshots/passage-thread-1440.webp 1440w">
+              <img
+                src="/assets/screenshots/passage-thread-1440.webp"
+                srcset="/assets/screenshots/passage-thread-720.webp 720w, /assets/screenshots/passage-thread-1440.webp 1440w"
+                sizes="(min-width: 1121px) 660px, (min-width: 901px) 56vw, (min-width: 641px) calc(100vw - 64px), calc(100vw - 48px)"
+                width="1440"
+                height="900"
+                alt="Passage thread panel showing an explanation, source evidence, and a cited passage button beside the highlighted source text."
+              >
+            </picture>
+            <figcaption>An explanation with its passage thread, source evidence, and citation block.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-attached" aria-labelledby="attached-title">
+      <div class="container">
+        <div class="section-heading">
+          <p class="section-label">What stays attached</p>
+          <h2 id="attached-title">The explanation keeps its source.</h2>
+        </div>
+
+        <dl class="feature-list">
+          <div>
+            <dt>Highlights</dt>
+            <dd>Persisted highlights render as marked slices of passage text and appear in the reader's highlight list. An explanation creates the highlight for its anchor. The reader has no separate highlight-only control.</dd>
+          </div>
+          <div>
+            <dt>Passage threads</dt>
+            <dd>Each anchor has a passage-scoped thread. Messages are append-only, and follow-up turns stay with the same passage.</dd>
+          </div>
+          <div>
+            <dt>Evidence and citations</dt>
+            <dd>An assistant message records evidence for the exact passage, a citation with the passage locator, and up to two nearby evidence rows. Citations navigate back to the passage in the document.</dd>
+          </div>
+          <div>
+            <dt>Reopening</dt>
+            <dd>Threads reload with their messages and citations. A source without a version is shown as Not ready in the library.</dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="continuity-title">
+      <div class="container split split-reverse">
+        <div>
+          <p class="section-label">Reading continuity</p>
+          <h2 id="continuity-title">Return to the exact place.</h2>
+          <div class="prose">
+            <p>Reading progress is saved for the authenticated user and the current document version. When a saved position exists and is not at the beginning, the reader offers <strong>Resume reading</strong> or <strong>Start from beginning</strong>.</p>
+            <p>It does not jump automatically before you choose. A new immutable version starts without a saved position.</p>
+          </div>
+        </div>
+
+        <figure class="screenshot-frame">
+          <picture data-screenshot="resume-reading">
+            <source type="image/avif" sizes="(min-width: 1121px) 660px, (min-width: 901px) 56vw, (min-width: 641px) calc(100vw - 64px), calc(100vw - 48px)" srcset="/assets/screenshots/resume-reading-720.avif 720w, /assets/screenshots/resume-reading-1440.avif 1440w">
+            <source type="image/webp" sizes="(min-width: 1121px) 660px, (min-width: 901px) 56vw, (min-width: 641px) calc(100vw - 64px), calc(100vw - 48px)" srcset="/assets/screenshots/resume-reading-720.webp 720w, /assets/screenshots/resume-reading-1440.webp 1440w">
+            <img
+              src="/assets/screenshots/resume-reading-1440.webp"
+              srcset="/assets/screenshots/resume-reading-720.webp 720w, /assets/screenshots/resume-reading-1440.webp 1440w"
+              sizes="(min-width: 1121px) 660px, (min-width: 901px) 56vw, (min-width: 641px) calc(100vw - 64px), calc(100vw - 48px)"
+              width="1440"
+              height="900"
+              alt="Bhasya reader showing the resume banner with Resume reading and Start from beginning buttons above the document."
+            >
+          </picture>
+          <figcaption>The resume prompt with both actions visible.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section section-export" aria-labelledby="export-title">
+      <div class="container split">
+        <div>
+          <p class="section-label">Reading-session export</p>
+          <h2 id="export-title">Keep the reading session.</h2>
+        </div>
+        <div class="prose">
+          <p>Export produces the article plus a Bhasya Reading Session appendix. The export includes threads created by the caller and the messages recorded in those threads, together with their evidence and citations. Generation is synchronous in this version, and PDF work stays server-side.</p>
+          <p>The export is not a full visual facsimile. Figures and images from the original page are omitted, captions render as text, and oversized appendices are truncated with an explicit note.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-architecture" id="architecture" aria-labelledby="architecture-title">
+      <div class="container">
+        <div class="section-heading">
+          <p class="section-label">Architecture and privacy</p>
+          <h2 id="architecture-title">The document is the source of truth.</h2>
+          <p class="lead">The canonical record is a document version with a passage tree. A chat transcript is not the source.</p>
+        </div>
+
+        <div class="architecture-grid">
+          <div class="model-column">
+            <h3>Canonical model</h3>
+            <pre class="model-diagram" tabindex="0" aria-label="Source to DocumentVersion, DocumentNode tree, Passage, Anchor, Highlight and Thread, Message, Evidence, Citation">Source
+└── DocumentVersion (immutable)
+    └── DocumentNode tree
+        └── Passage
+            └── Anchor
+                ├── Highlight
+                └── Thread
+                    └── Message
+                        └── Evidence
+                            └── Citation</pre>
+            <p class="note">Reading progress and exports are auxiliary records. They do not change the canonical chain.</p>
+          </div>
+
+          <div class="privacy-column">
+            <h3>Privacy boundary</h3>
+            <ul class="rule-list">
+              <li>Identity comes from Better Auth; workspace and object access is enforced by API authorization and workspace-scoped SQL.</li>
+              <li>Source HTML and export artifacts are stored through server-side storage adapters. Export downloads pass through the authorized API. The application does not mint public artifact URLs.</li>
+              <li>Imported content is supplied as source material to the explanation workflow and is not executed by the application.</li>
+              <li>Explanation uses the selected text, the full L0 passage, and up to three same-section passages. When there are no additional same-section passages, retrieval falls back to full-text matches elsewhere in the same document.</li>
+              <li>Bhasya's application event log stores metadata rather than prompts, assistant response bodies, or the full document body. Source URLs and titles may still appear as metadata and can be sensitive. This statement does not describe external model-provider logging or retention.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="retrieval-note">
+          <h3>What the current retrieval does</h3>
+          <p>Explanations use the exact passage (L0) plus nearby same-section passages (L1), with a PostgreSQL full-text fallback. pgvector and an embeddings table are provisioned at the database layer, but the current explanation workflow does not generate embeddings or run vector similarity retrieval.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-status" id="status" aria-labelledby="status-title">
+      <div class="container">
+        <div class="section-heading">
+          <p class="section-label">Current status</p>
+          <h2 id="status-title">Staging, not a public launch.</h2>
+        </div>
+
+        <dl class="status-list">
+          <div><dt>Environment</dt><dd>Staging only. No production deployment is configured in this repository.</dd></div>
+          <div><dt>Model</dt><dd>The passage-thread screenshot shows an explanation labeled <code>gemini-3.1-flash-lite</code>. The repository default is <code>dev-grounded-1</code>; the repository default does not establish the live Worker's configuration.</dd></div>
+          <div><dt>Accounts</dt><dd>This staging demonstration uses an operator-provisioned account.</dd></div>
+          <div><dt>Data</dt><dd>Do not use staging for sensitive material.</dd></div>
+        </dl>
+
+        <div class="limitations">
+          <h3>Current limitations</h3>
+          <ul class="rule-list">
+            <li>Vector retrieval is provisioned but not active in the explanation workflow.</li>
+            <li>PDF export is synchronous and lossy: figures, images, author metadata, tables, and rich links are not preserved.</li>
+            <li>Reading progress is per document version. A new version starts without a saved position.</li>
+            <li>Ingestion accepts public HTML and text URLs. EPUB, Markdown, and DOCX conversion are deferred, and there is no upload UI.</li>
+            <li>The web app is the only client. Browser extension, Tauri desktop, offline sync, collaborative editing, billing, and large-scale export are deferred.</li>
+            <li>There is no self-serve account or source deletion flow.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-links" aria-labelledby="links-title">
+      <div class="container links-grid">
+        <div>
+          <p class="section-label">Read the code. Try the staging build.</p>
+          <h2 id="links-title">The source is public. Access is limited.</h2>
+        </div>
+        <div class="link-list">
+          <a href="https://github.com/arjunmaybe/Bhasya" target="_blank" rel="noopener noreferrer">
+            <span>GitHub repository</span>
+            <span>Source, architecture, and setup</span>
+          </a>
+          <a href="https://bhasya-web.devmesh-8143.workers.dev" target="_blank" rel="noopener noreferrer">
+            <span>Staging application</span>
+            <span>Sign-in required; operator-provisioned account</span>
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div>
+        <p class="footer-wordmark">Bhasya</p>
+        <p class="footer-note">Staging preview. Operator-provisioned account. No production deployment is configured in this repository.</p>
+      </div>
+      <nav aria-label="Footer">
+        <a href="https://github.com/arjunmaybe/Bhasya" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href="https://bhasya-web.devmesh-8143.workers.dev" target="_blank" rel="noopener noreferrer">Staging app</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>
